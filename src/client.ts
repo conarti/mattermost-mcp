@@ -101,18 +101,88 @@ export class MattermostClient {
     return response.json() as Promise<Post>;
   }
 
-  async getPostsForChannel(channelId: string, limit: number = 30, page: number = 0): Promise<PostsResponse> {
+  async getPostsForChannel(
+    channelId: string,
+    limit: number = 30,
+    page: number = 0,
+    options?: {
+      since?: number;      // Unix timestamp in milliseconds
+      before?: string;     // Post ID to get posts before
+      after?: string;      // Post ID to get posts after
+    }
+  ): Promise<PostsResponse> {
     const url = new URL(`${this.baseUrl}/channels/${channelId}/posts`);
     url.searchParams.append('page', page.toString());
     url.searchParams.append('per_page', limit.toString());
-    
+
+    if (options?.since) {
+      url.searchParams.append('since', options.since.toString());
+    }
+    if (options?.before) {
+      url.searchParams.append('before', options.before);
+    }
+    if (options?.after) {
+      url.searchParams.append('after', options.after);
+    }
+
     const response = await fetch(url.toString(), { headers: this.headers });
-    
+
     if (!response.ok) {
       throw new Error(`Failed to get posts: ${response.status} ${response.statusText}`);
     }
-    
+
     return response.json() as Promise<PostsResponse>;
+  }
+
+  // Get all posts from a channel with auto-pagination
+  async getAllPostsForChannel(
+    channelId: string,
+    options?: {
+      since?: number;
+      before?: string;
+      after?: string;
+      maxPosts?: number;   // Maximum number of posts to fetch (default: no limit)
+    }
+  ): Promise<PostsResponse> {
+    const allPosts: Record<string, Post> = {};
+    const allOrder: string[] = [];
+    const perPage = 200; // Max per page
+    let page = 0;
+    let hasMore = true;
+    const maxPosts = options?.maxPosts || Infinity;
+
+    while (hasMore && allOrder.length < maxPosts) {
+      const response = await this.getPostsForChannel(channelId, perPage, page, {
+        since: options?.since,
+        before: options?.before,
+        after: options?.after,
+      });
+
+      if (response.order.length === 0) {
+        hasMore = false;
+        break;
+      }
+
+      // Merge posts
+      Object.assign(allPosts, response.posts);
+      allOrder.push(...response.order);
+
+      // Check if there are more posts
+      hasMore = response.order.length === perPage;
+      page++;
+
+      // Respect maxPosts limit
+      if (allOrder.length >= maxPosts) {
+        break;
+      }
+    }
+
+    return {
+      order: allOrder.slice(0, maxPosts),
+      posts: allPosts,
+      next_post_id: '',
+      prev_post_id: '',
+    };
   }
 
   async getPost(postId: string): Promise<Post> {

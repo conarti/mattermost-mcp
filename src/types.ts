@@ -27,6 +27,10 @@ export interface GetChannelHistoryArgs {
   channel_id: string;
   limit?: number;
   page?: number;
+  since_date?: string;
+  before_post_id?: string;
+  after_post_id?: string;
+  get_all?: boolean;
 }
 
 export interface GetThreadRepliesArgs {

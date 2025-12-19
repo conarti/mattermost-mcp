@@ -36,13 +36,30 @@ export const getChannelHistoryTool: Tool = {
       },
       limit: {
         type: "number",
-        description: "Number of messages to retrieve (default 30)",
+        description: "Number of messages to retrieve (default 30). Use 0 or 'all' to get all messages.",
         default: 30,
       },
       page: {
         type: "number",
         description: "Page number for pagination (starting from 0)",
         default: 0,
+      },
+      since_date: {
+        type: "string",
+        description: "Get messages after this date (ISO 8601 format, e.g., '2025-12-18' or '2025-12-18T10:00:00Z')",
+      },
+      before_post_id: {
+        type: "string",
+        description: "Get messages before this post ID",
+      },
+      after_post_id: {
+        type: "string",
+        description: "Get messages after this post ID",
+      },
+      get_all: {
+        type: "boolean",
+        description: "Get all messages from the channel (ignores limit/page, uses auto-pagination)",
+        default: false,
       },
     },
     required: ["channel_id"],
@@ -122,11 +139,44 @@ export async function handleGetChannelHistory(
   client: MattermostClient,
   args: GetChannelHistoryArgs
 ) {
-  const { channel_id, limit = 30, page = 0 } = args;
-  
+  const {
+    channel_id,
+    limit = 30,
+    page = 0,
+    since_date,
+    before_post_id,
+    after_post_id,
+    get_all = false,
+  } = args;
+
   try {
-    const response = await client.getPostsForChannel(channel_id, limit, page);
-    
+    // Parse since_date to timestamp if provided
+    let sinceTimestamp: number | undefined;
+    if (since_date) {
+      const date = new Date(since_date);
+      if (isNaN(date.getTime())) {
+        throw new Error(`Invalid date format: ${since_date}. Use ISO 8601 format (e.g., '2025-12-18' or '2025-12-18T10:00:00Z')`);
+      }
+      sinceTimestamp = date.getTime();
+    }
+
+    let response;
+
+    if (get_all) {
+      // Use auto-pagination to get all posts
+      response = await client.getAllPostsForChannel(channel_id, {
+        since: sinceTimestamp,
+        before: before_post_id,
+        after: after_post_id,
+      });
+    } else {
+      response = await client.getPostsForChannel(channel_id, limit, page, {
+        since: sinceTimestamp,
+        before: before_post_id,
+        after: after_post_id,
+      });
+    }
+
     // Format the posts for better readability
     const formattedPosts = response.order.map(postId => {
       const post = response.posts[postId];
@@ -139,17 +189,24 @@ export async function handleGetChannelHistory(
         root_id: post.root_id || null,
       };
     });
-    
+
     return {
       content: [
         {
           type: "text",
           text: JSON.stringify({
             posts: formattedPosts,
-            has_next: !!response.next_post_id,
-            has_prev: !!response.prev_post_id,
-            page: page,
-            per_page: limit,
+            total_posts: formattedPosts.length,
+            has_next: !get_all && !!response.next_post_id,
+            has_prev: !get_all && !!response.prev_post_id,
+            page: get_all ? null : page,
+            per_page: get_all ? null : limit,
+            filters: {
+              since_date: since_date || null,
+              before_post_id: before_post_id || null,
+              after_post_id: after_post_id || null,
+              get_all,
+            },
           }, null, 2),
         },
       ],
