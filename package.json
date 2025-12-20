@@ -1,6 +1,6 @@
 {
   "name": "@conarti/mattermost-mcp",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Mattermost MCP Server",
   "repository": {
     "type": "git",
