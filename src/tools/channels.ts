@@ -5,7 +5,7 @@ import { ListChannelsArgs, GetChannelHistoryArgs } from "../types.js";
 // Tool definition for listing channels
 export const listChannelsTool: Tool = {
   name: "mattermost_list_channels",
-  description: "List public channels in the Mattermost workspace with pagination",
+  description: "List channels in the Mattermost workspace. By default lists public team channels. Set include_private=true to get all channels including private channels and direct messages (DMs).",
   inputSchema: {
     type: "object",
     properties: {
@@ -19,6 +19,11 @@ export const listChannelsTool: Tool = {
         description: "Page number for pagination (starting from 0)",
         default: 0,
       },
+      include_private: {
+        type: "boolean",
+        description: "If true, returns all channels for the current user including private channels and direct messages. If false (default), returns only public team channels.",
+        default: false,
+      },
     },
   },
 };
@@ -26,7 +31,7 @@ export const listChannelsTool: Tool = {
 // Tool definition for getting channel history
 export const getChannelHistoryTool: Tool = {
   name: "mattermost_get_channel_history",
-  description: "Get recent messages from a Mattermost channel",
+  description: "Get messages from a Mattermost channel. By default returns ALL messages. Use limit parameter to restrict the number of messages.",
   inputSchema: {
     type: "object",
     properties: {
@@ -36,12 +41,11 @@ export const getChannelHistoryTool: Tool = {
       },
       limit: {
         type: "number",
-        description: "Number of messages to retrieve (default 30). Use 0 or 'all' to get all messages.",
-        default: 30,
+        description: "Number of messages to retrieve. If not specified or 0, returns ALL messages from the channel.",
       },
       page: {
         type: "number",
-        description: "Page number for pagination (starting from 0)",
+        description: "Page number for pagination (starting from 0). Only used when limit > 0.",
         default: 0,
       },
       since_date: {
@@ -56,11 +60,6 @@ export const getChannelHistoryTool: Tool = {
         type: "string",
         description: "Get messages after this post ID",
       },
-      get_all: {
-        type: "boolean",
-        description: "Get all messages from the channel (ignores limit/page, uses auto-pagination)",
-        default: false,
-      },
     },
     required: ["channel_id"],
   },
@@ -73,9 +72,13 @@ export async function handleListChannels(
 ) {
   const limit = args.limit || 100;
   const page = args.page || 0;
-  
+  const includePrivate = args.include_private || false;
+
   try {
-    const response = await client.getChannels(limit, page);
+    // Use getMyChannels for private channels/DMs, getChannels for public team channels
+    const response = includePrivate
+      ? await client.getMyChannels(limit, page)
+      : await client.getChannels(limit, page);
     
     // Check if response.channels exists
     if (!response || !response.channels) {
@@ -141,13 +144,15 @@ export async function handleGetChannelHistory(
 ) {
   const {
     channel_id,
-    limit = 30,
+    limit,
     page = 0,
     since_date,
     before_post_id,
     after_post_id,
-    get_all = false,
   } = args;
+
+  // If limit is not specified or is 0, get all messages
+  const getAll = !limit || limit === 0;
 
   try {
     // Parse since_date to timestamp if provided
@@ -162,7 +167,7 @@ export async function handleGetChannelHistory(
 
     let response;
 
-    if (get_all) {
+    if (getAll) {
       // Use auto-pagination to get all posts
       response = await client.getAllPostsForChannel(channel_id, {
         since: sinceTimestamp,
@@ -197,15 +202,14 @@ export async function handleGetChannelHistory(
           text: JSON.stringify({
             posts: formattedPosts,
             total_posts: formattedPosts.length,
-            has_next: !get_all && !!response.next_post_id,
-            has_prev: !get_all && !!response.prev_post_id,
-            page: get_all ? null : page,
-            per_page: get_all ? null : limit,
+            has_next: !getAll && !!response.next_post_id,
+            has_prev: !getAll && !!response.prev_post_id,
+            page: getAll ? null : page,
+            per_page: getAll ? null : limit,
             filters: {
               since_date: since_date || null,
               before_post_id: before_post_id || null,
               after_post_id: after_post_id || null,
-              get_all,
             },
           }, null, 2),
         },

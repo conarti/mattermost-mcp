@@ -276,6 +276,36 @@ export class MattermostClient {
     return response.json() as Promise<UserProfile>;
   }
 
+  // Get channels for current user (includes private channels and DMs)
+  async getMyChannels(limit: number = 100, page: number = 0): Promise<ChannelsResponse> {
+    const url = new URL(`${this.baseUrl}/users/me/channels`);
+    url.searchParams.append('page', page.toString());
+    url.searchParams.append('per_page', limit.toString());
+
+    try {
+      const response = await fetch(url.toString(), { headers: this.headers });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Failed to get user channels: ${response.status} ${response.statusText} - ${errorText}`);
+      }
+
+      const channelsArray = await response.json();
+
+      if (Array.isArray(channelsArray)) {
+        return {
+          channels: channelsArray,
+          total_count: channelsArray.length
+        };
+      }
+
+      return channelsArray as ChannelsResponse;
+    } catch (error) {
+      console.error(`Error fetching user channels: ${error instanceof Error ? error.message : String(error)}`);
+      throw error;
+    }
+  }
+
   // Direct message channel methods
   async createDirectMessageChannel(otherUserId: string): Promise<Channel> {
     // First get current user ID
