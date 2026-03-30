@@ -2,6 +2,10 @@
 
 MCP Server for the Mattermost API, enabling Claude and other MCP clients to interact with Mattermost workspaces.
 
+## Hosted deployment
+
+A hosted deployment is available on [Fronteir AI](https://fronteir.ai/mcp/conarti-mattermost-mcp).
+
 ## Quick Start
 
 ### Using npx (recommended)
