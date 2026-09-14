@@ -134,3 +134,20 @@ export interface UsersResponse {
   users: User[];
   total_count: number;
 }
+
+export interface HttpRequest {
+  method: 'GET' | 'POST';
+  headers: Record<string, string>;
+  body?: string;
+  signal?: AbortSignal;
+}
+
+export interface HttpResponse {
+  ok: boolean;
+  status: number;
+  statusText: string;
+  json(): Promise<unknown>;
+  text(): Promise<string>;
+}
+
+export type HttpFetch = (url: string, request: HttpRequest) => Promise<HttpResponse>;
