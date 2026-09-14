@@ -13,6 +13,7 @@ import {
   createBrowserLogin,
 } from '../../src/authentication/browserLogin.js';
 import {
+  AuthenticationTimings,
   DEFAULT_AUTHENTICATION_TIMINGS,
   PRIVATE_FILE_MODE,
   TEMPORARY_FILE_EXTENSION,
@@ -26,7 +27,7 @@ import {
   LoginLockRenewalResult,
   LoginLockState,
 } from '../../src/authentication/loginLock.js';
-import { MattermostAuthenticationError } from '../../src/authentication/runtime.js';
+import { AuthenticationLogger, MattermostAuthenticationError } from '../../src/authentication/runtime.js';
 import {
   BACKGROUND_CALL_CONTEXT,
   BrowserAuthenticationSession,
@@ -72,6 +73,9 @@ const START_MILLISECONDS = 1_000_000_000_000;
 const LIVE_FOREIGN_PROCESS_ID = 424242;
 const DEAD_PROCESS_ID = 424243;
 const FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS = 5_000;
+const LONG_FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS = 15_000;
+const CANCELLED_ATTEMPT_WAIT_LOG = 'previous sign-in attempt was cancelled, waiting for it to finish';
+const CANCELLED_ATTEMPT_WAIT_LOG_LIMIT = 10;
 const SITE_URL = 'https://chat.example.test';
 const MATTERMOST_URL = `${SITE_URL}/api/v4`;
 const TEAM_ID = 'team-test';
@@ -206,6 +210,9 @@ interface SessionTestOptions {
   realBrowserLoginContext?: FakeLoginBrowserContext;
   validateToken?: (candidateToken: string) => Promise<TokenValidationResult>;
   readToken?: (read: () => Promise<string | undefined>) => Promise<string | undefined>;
+  timings?: Partial<AuthenticationTimings>;
+  /** Вызывается после записи каждой строки лога сессии и может бросить, чтобы оборвать зациклившийся вызов */
+  onSessionLog?: (message: string) => void;
 }
 
 interface SessionTestHarness {
@@ -238,7 +245,11 @@ async function createSessionHarness(options: SessionTestOptions = {}): Promise<S
   const clock = new FakeClock(START_MILLISECONDS);
   const logs = createLogCapture();
   const events: string[] = [];
-  const timings = DEFAULT_AUTHENTICATION_TIMINGS;
+  const timings: AuthenticationTimings = { ...DEFAULT_AUTHENTICATION_TIMINGS, ...options.timings };
+  const sessionLogger: AuthenticationLogger = (message) => {
+    logs.logger(message);
+    options.onSessionLog?.(message);
+  };
   const lockOptions: LoginLockOptions = {
     paths,
     timings,
@@ -283,7 +294,7 @@ async function createSessionHarness(options: SessionTestOptions = {}): Promise<S
     performBrowserLogin,
     validateToken: options.validateToken ?? validator.validateToken,
     timings,
-    logger: logs.logger,
+    logger: sessionLogger,
     clock,
   });
 
@@ -356,6 +367,20 @@ function getPendingRecovery(session: BrowserAuthenticationSession): Record<strin
 
 function countEvents(events: readonly string[], event: string): number {
   return events.filter((entry) => entry === event).length;
+}
+
+/** Таймаут теста не останавливает асинхронный цикл, поэтому повторное ожидание отменённой попытки обрывается из лога */
+function createCancelledAttemptWaitGuard(): (message: string) => void {
+  let waitCount = 0;
+  return (message) => {
+    if (!message.includes(CANCELLED_ATTEMPT_WAIT_LOG)) {
+      return;
+    }
+    waitCount += 1;
+    if (waitCount > CANCELLED_ATTEMPT_WAIT_LOG_LIMIT) {
+      throw new Error(`cancelled attempt was awaited more than ${CANCELLED_ATTEMPT_WAIT_LOG_LIMIT} times`);
+    }
+  };
 }
 
 test('fake process ids differ from the test process id', () => {
@@ -669,6 +694,35 @@ test('N15: a laptop sleep longer than the deadline gives LOGIN_TIMEOUT without t
   assert.equal(harness.browserLogin.callCount, 0);
   assert.deepEqual(harness.launcher.launchCalls, []);
   assert.equal(await readFile(harness.paths.loginLockPath, TEXT_FILE_ENCODING), lockContent);
+  assert.ok(harness.logs.includes('sign-in timed out after 400 s (no browser window in this process)'));
+});
+
+test('N15: a token written during a laptop sleep longer than the deadline is returned instead of LOGIN_TIMEOUT', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
+  const harness = await createSessionHarness();
+  await harness.writeLockRecord(createForeignRecord(LIVE_FOREIGN_PROCESS_ID, START_MILLISECONDS));
+
+  const recovery = trackPromise(harness.session.getToken(harness.createCallContext().context));
+  await harness.clock.waitForPendingSleeps(1);
+  await harness.writeStoredToken(FRESH_TOKEN);
+  harness.clock.advance(400_000);
+
+  assert.equal(await recovery.promise, FRESH_TOKEN);
+  assert.equal(harness.browserLogin.callCount, 0);
+  assert.equal(harness.logs.includes('sign-in timed out'), false);
+});
+
+test('N15: a deadline that passes while the lock is being taken gives LOGIN_TIMEOUT without a window', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
+  const harness = await createSessionHarness();
+  harness.loginLock.hooks.afterTryAcquire = async (heldLock) => {
+    if (heldLock !== undefined) {
+      harness.clock.advance(DEFAULT_AUTHENTICATION_TIMINGS.loginTimeoutMilliseconds);
+    }
+  };
+
+  await expectAuthenticationError(harness.session.getToken(harness.createCallContext().context), 'LOGIN_TIMEOUT');
+  assert.equal(harness.launcher.inspectCalls, 0);
+  assert.equal(harness.browserLogin.callCount, 0);
+  assert.equal(await pathExists(harness.paths.loginLockPath), false);
   assert.ok(harness.logs.includes('sign-in timed out after 300 s (no browser window in this process)'));
 });
 
@@ -1141,10 +1195,12 @@ test('N28 (d): a call cancelled while waiting starts no installation after takin
   assert.equal(await pathExists(harness.paths.loginLockPath), false);
 });
 
-test('N28 (e): a call after a cancelled installation waits for that attempt and then starts a new one', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
+test('N28 (e): a call after a cancelled installation waits for that attempt, then starts a new one with growing progress', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
   const harness = await createSessionHarness({
     installed: false,
     installer: { steps: [{ kind: 'deferred' }, { kind: 'succeed' }], rejectOnAbort: false },
+    loginSteps: [{ kind: 'deferred' }],
+    onSessionLog: createCancelledAttemptWaitGuard(),
   });
   const first = harness.createCallContext();
   const second = harness.createCallContext();
@@ -1155,15 +1211,28 @@ test('N28 (e): a call after a cancelled installation waits for that attempt and 
   assert.equal(harness.installer.signals[0].aborted, true);
 
   const secondCall = trackPromise(harness.session.getToken(second.context));
-  await waitForCondition(() => harness.logs.includes('previous sign-in attempt was cancelled, waiting for it to finish'));
+  await waitForCondition(() => harness.logs.includes(CANCELLED_ATTEMPT_WAIT_LOG));
   await flushAsyncWork();
   assert.equal(secondCall.settled, false);
   assert.equal(harness.installer.callCount, 1);
   assert.equal(harness.logs.includes('joining sign-in already in progress'), false);
+  harness.clock.advance(10_000);
+  harness.clock.advance(10_000);
+  assert.equal(second.notifications.length, 2);
 
   harness.installer.pendingInstallations[0].reject(createCancelledInstallationError(harness.installer.signals[0]));
   await expectAuthenticationError(firstCall.promise, 'BROWSER_INSTALLATION_FAILED');
 
+  await harness.browserLogin.waitForCalls(1);
+  harness.clock.advance(10_000);
+  harness.clock.advance(10_000);
+  const progressValues = second.notifications.map((notification) => notification.progress);
+  assert.equal(progressValues.length, 4);
+  for (let index = 1; index < progressValues.length; index += 1) {
+    assert.ok(progressValues[index] > progressValues[index - 1], `progress values: ${progressValues.join(', ')}`);
+  }
+
+  harness.browserLogin.pendingResults[0].resolve(FRESH_TOKEN);
   assert.equal(await secondCall.promise, FRESH_TOKEN);
   assert.equal(harness.installer.callCount, 2);
   assert.equal(harness.installer.signals[1].aborted, false);
@@ -1226,7 +1295,7 @@ test('N28 (g): cancelling during the window after the download lets a new call j
   assert.equal(harness.browserLogin.callCount, 1);
 });
 
-test('N28 (g): an installation that succeeds despite a late cancellation clears the cancelled flag', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
+test('N28 (i): an installation that succeeds despite a late cancellation clears the cancelled flag', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
   const harness = await createSessionHarness({
     installed: false,
     installer: { steps: [{ kind: 'deferred' }], rejectOnAbort: false },
@@ -1262,6 +1331,7 @@ test('N28 (h): a call waiting for a cancelled attempt never joins the settled at
   const harness = await createSessionHarness({
     installed: false,
     installer: { steps: [{ kind: 'deferred' }, { kind: 'succeed' }], rejectOnAbort: false },
+    onSessionLog: createCancelledAttemptWaitGuard(),
   });
   const first = harness.createCallContext();
   const second = harness.createCallContext();
@@ -1290,11 +1360,51 @@ test('N28 (h): a call waiting for a cancelled attempt never joins the settled at
   assert.equal(harness.logs.includes('joining sign-in already in progress'), false);
 });
 
+test('N28 (j): a call cancelled while waiting for a cancelled attempt starts no new attempt', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
+  const harness = await createSessionHarness({
+    installed: false,
+    installer: { steps: [{ kind: 'deferred' }, { kind: 'succeed' }], rejectOnAbort: false },
+    onSessionLog: createCancelledAttemptWaitGuard(),
+  });
+  const first = harness.createCallContext();
+  const second = harness.createCallContext();
+
+  const firstCall = trackPromise(harness.session.getToken(first.context));
+  await harness.installer.waitForCalls(1);
+  first.controller.abort();
+  const secondCall = trackPromise(harness.session.getToken(second.context));
+  await waitForCondition(() => harness.logs.includes(CANCELLED_ATTEMPT_WAIT_LOG));
+  second.controller.abort();
+
+  harness.installer.pendingInstallations[0].reject(createCancelledInstallationError(harness.installer.signals[0]));
+  await expectAuthenticationError(firstCall.promise, 'BROWSER_INSTALLATION_FAILED');
+  await expectAuthenticationError(secondCall.promise, 'LOGIN_NOT_COMPLETED', 'cancelled while waiting');
+  assert.equal(harness.installer.callCount, 1);
+  assert.equal(harness.browserLogin.callCount, 0);
+  assert.equal(getPendingRecovery(harness.session), undefined);
+  assert.equal(await pathExists(harness.paths.loginLockPath), false);
+  assert.ok(harness.logs.includes('no new sign-in started'));
+});
+
+test('N28 (k): a call cancelled before it starts adds no interest, so its installation is cancelled at once', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
+  const harness = await createSessionHarness({ installed: false });
+  const { context, controller } = harness.createCallContext();
+  controller.abort();
+
+  await expectAuthenticationError(harness.session.getToken(context), 'BROWSER_INSTALLATION_FAILED');
+  assert.equal(harness.installer.callCount, 1);
+  assert.equal(harness.installer.signals[0].aborted, true);
+  assert.equal(harness.installer.signals[0].reason, 'cancelled');
+  assert.equal(harness.browserLogin.callCount, 0);
+  assert.equal(await pathExists(harness.paths.loginLockPath), false);
+});
+
 async function runWaiterWithRenewals(options: {
   renewAt: (elapsedMilliseconds: number) => 'same-nonce' | 'other-nonce' | undefined;
   maximumElapsedMilliseconds: number;
+  timings?: Partial<AuthenticationTimings>;
 }): Promise<{ harness: SessionTestHarness; settledAfterMilliseconds: number; call: TrackedPromise<string>; notifications: SentNotification[] }> {
-  const harness = await createSessionHarness();
+  const harness = await createSessionHarness({ timings: options.timings });
   let record = createForeignRecord(LIVE_FOREIGN_PROCESS_ID, START_MILLISECONDS);
   await harness.writeLockRecord(record);
   const { context, notifications } = harness.createCallContext();
@@ -1327,9 +1437,11 @@ test('N29: a waiter extends its deadline when the holder renews the record', { t
     maximumElapsedMilliseconds: 700_000,
   });
 
-  await expectAuthenticationError(call.promise, 'LOGIN_TIMEOUT');
+  const waitedSeconds = settledAfterMilliseconds / 1_000;
+  await expectAuthenticationError(call.promise, 'LOGIN_TIMEOUT', `did not complete within ${waitedSeconds} s`);
   assert.ok(settledAfterMilliseconds > 580_000);
   assert.ok(settledAfterMilliseconds >= 590_000 && settledAfterMilliseconds <= 592_000, `timed out after ${settledAfterMilliseconds} ms`);
+  assert.ok(harness.logs.includes(`sign-in timed out after ${waitedSeconds} s`));
   assert.equal(harness.logs.count('login lock renewed by holder process 424242, extending wait'), 1);
   assert.ok(notifications.length > 0);
   assert.ok(notifications.every((notification) => notification.message.includes('another process')));
@@ -1347,7 +1459,7 @@ test('N29: a record with another nonce does not extend the deadline', { timeout:
   assert.equal(harness.logs.includes('extending wait'), false);
 });
 
-test('N29: renewals without end stop extending the deadline at 954 s after the record first appeared', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
+test('N29: renewals without end stop extending the deadline at 954 s after the record first appeared', { timeout: LONG_FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
   const { settledAfterMilliseconds, call } = await runWaiterWithRenewals({
     renewAt: (elapsedMilliseconds) => (elapsedMilliseconds % 30_000 === 0 ? 'same-nonce' : undefined),
     maximumElapsedMilliseconds: 1_000_000,
@@ -1355,6 +1467,26 @@ test('N29: renewals without end stop extending the deadline at 954 s after the r
 
   await expectAuthenticationError(call.promise, 'LOGIN_TIMEOUT');
   assert.ok(settledAfterMilliseconds >= 954_000 && settledAfterMilliseconds <= 956_000, `timed out after ${settledAfterMilliseconds} ms`);
+});
+
+test('N29: the extension limit takes the holder step allowance from the configured timings', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
+  const { settledAfterMilliseconds, call } = await runWaiterWithRenewals({
+    renewAt: (elapsedMilliseconds) => (elapsedMilliseconds % 30_000 === 0 ? 'same-nonce' : undefined),
+    maximumElapsedMilliseconds: 400_000,
+    timings: {
+      browserInstallationTimeoutMilliseconds: 60_000,
+      installationTerminationGraceMilliseconds: 1_000,
+      lockReleaseTimeoutMilliseconds: 2_000,
+      loginTimeoutMilliseconds: 100_000,
+      cookieReadTimeoutMilliseconds: 1_000,
+      tokenValidationTimeoutMilliseconds: 2_000,
+      browserCloseTimeoutMilliseconds: 3_000,
+    },
+  });
+
+  /* 60 + 2 × 1 + 2 × 2 + 100 + (1 + 2 + 3) = 172 с от первого появления записи */
+  await expectAuthenticationError(call.promise, 'LOGIN_TIMEOUT');
+  assert.ok(settledAfterMilliseconds >= 172_000 && settledAfterMilliseconds <= 174_000, `timed out after ${settledAfterMilliseconds} ms`);
 });
 
 test('N30: a lost lock during installation stops the installer with its own reason', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {

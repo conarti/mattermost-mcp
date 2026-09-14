@@ -22,6 +22,7 @@ import {
   TEMPORARY_FILE_EXTENSION,
   TEXT_FILE_ENCODING,
   TOKEN_FILE_NAME,
+  TRAILING_SLASHES_PATTERN,
 } from './constants.js';
 import { AuthenticationLogger, MattermostAuthenticationError, getErrorCode } from './runtime.js';
 
@@ -149,7 +150,7 @@ const FOREIGN_OWNER_TOKEN_FILE_MESSAGE = 'token file is owned by another user, i
 const WIDE_PERMISSIONS_TOKEN_FILE_MESSAGE = 'token file permissions are wider than 0600, ignoring';
 
 function normalizeSiteUrl(siteUrl: string): string {
-  return new URL(siteUrl).href.replace(/\/+$/, '');
+  return new URL(siteUrl).href.replace(TRAILING_SLASHES_PATTERN, '');
 }
 
 function parseStoredSiteUrl(value: unknown): string | undefined {

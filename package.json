@@ -17,7 +17,7 @@
     "postbuild": "chmod +x build/index.js",
     "start": "node build/index.js",
     "dev": "tsc && node build/index.js",
-    "test": "node -e \"require('node:fs').rmSync('build-test', { recursive: true, force: true })\" && tsc -p tsconfig.test.json && node --test \"build-test/test/**/*.test.js\""
+    "test": "node -e \"require('node:fs').rmSync('build-test', { recursive: true, force: true })\" && tsc -p tsconfig.test.json && node --test --test-force-exit \"build-test/test/**/*.test.js\""
   },
   "keywords": [
     "mattermost",

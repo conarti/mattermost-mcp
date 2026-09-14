@@ -22,6 +22,7 @@ import {
   SESSION_COOKIE_NAME,
   SESSION_COOKIE_URL_PATH,
   SYSTEM_DEPENDENCIES_INSTALL_ARGUMENTS,
+  TRAILING_SLASHES_PATTERN,
 } from './constants.js';
 import {
   AuthenticationLogger,
@@ -32,7 +33,6 @@ import {
 } from './runtime.js';
 import { StatePaths, ensurePrivateDirectory, ensureStateDirectory } from './stateFiles.js';
 
-const TRAILING_SLASHES_PATTERN = /\/+$/;
 const PARENT_DIRECTORY_SEGMENT = '..';
 
 export function deriveSiteUrl(mattermostApiUrl: string): string {

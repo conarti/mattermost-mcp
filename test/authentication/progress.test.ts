@@ -88,6 +88,27 @@ test('P2: three ticks send progress 10, 20 and 30 and stop after the operation s
   assert.equal(notifications.length, 3);
 });
 
+test('P2: a second wait in the same call continues from the last sent progress', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval', 'Date'] });
+  const { context, notifications } = createRecordingCallContext({ progressToken: PROGRESS_TOKEN });
+
+  for (const tickCount of [3, 4]) {
+    const operation = createDeferred<string>();
+    const result = awaitWithProgress(operation.promise, context, PROGRESS_INTERVAL_MILLISECONDS);
+    for (let tick = 0; tick < tickCount; tick += 1) {
+      t.mock.timers.tick(PROGRESS_INTERVAL_MILLISECONDS);
+    }
+    operation.resolve(OPERATION_RESULT);
+    await result;
+  }
+
+  assert.deepEqual(
+    notifications.map((notification) => notification.progress),
+    [10, 20, 30, 31, 32, 33, 40],
+  );
+  assert.equal(notifications[3].message, `${LOGIN_PROGRESS_MESSAGE} (31 s)`);
+});
+
 test('P3: a failing notification does not reject the wait and is logged once', async (t) => {
   t.mock.timers.enable({ apis: ['setInterval', 'Date'] });
   const { context, notifications, logs } = createRecordingCallContext({

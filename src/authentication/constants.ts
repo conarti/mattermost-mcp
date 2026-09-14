@@ -92,6 +92,7 @@ export const INSPECTED_ERROR_CODE_LINE_PATTERN = /^\s+code: '([^'\s]+)',?\s*$/;
 export const SPAWN_SYSTEM_CALL_PATTERN = /^spawn(?:\s|$)/;
 export const URL_CREDENTIALS_PATTERN = /\/\/[^\s/?#]*@/g;
 export const REDACTED_URL_CREDENTIALS = '//***@';
+export const TRAILING_SLASHES_PATTERN = /\/+$/;
 
 export const AUTHENTICATION_MODES = {
   STATIC: 'static',
@@ -106,8 +107,6 @@ export const HTTP_POST_METHOD = 'POST';
 export const HTTP_STATUS_OK = 200;
 export const HTTP_STATUS_UNAUTHORIZED = 401;
 export const UNKNOWN_ERROR_NAME = 'UnknownError';
-/** Чтение cookie 5 с, проверка токена 10 с и закрытие окна 5 с после срока входа у держателя */
-export const HOLDER_LOGIN_STEP_ALLOWANCE_MILLISECONDS = 20_000;
 export const VACANT_STEPS_BEFORE_LOGIN_NOT_COMPLETED = 2;
 
 export interface AuthenticationTimings {

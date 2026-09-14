@@ -21,7 +21,6 @@ import {
   BROWSER_INSTALLATION_PROGRESS_MESSAGE,
   CURRENT_USER_API_PATH,
   DEFAULT_AUTHENTICATION_TIMINGS,
-  HOLDER_LOGIN_STEP_ALLOWANCE_MILLISECONDS,
   HTTP_GET_METHOD,
   HTTP_STATUS_OK,
   HTTP_STATUS_UNAUTHORIZED,
@@ -29,6 +28,7 @@ import {
   LOGIN_PROGRESS_MESSAGE,
   MILLISECONDS_PER_SECOND,
   OTHER_PROCESS_PROGRESS_MESSAGE,
+  TRAILING_SLASHES_PATTERN,
   UNKNOWN_ERROR_NAME,
   VACANT_STEPS_BEFORE_LOGIN_NOT_COMPLETED,
 } from './constants.js';
@@ -49,6 +49,8 @@ export interface ProgressUpdate {
 
 export interface CallAuthenticationState {
   browserLoginStarted: boolean;
+  /** Последний отправленный прогресс вызова: MCP требует строгого роста между ожиданиями одного вызова */
+  lastReportedProgress?: number;
 }
 
 export interface RequestCallContext {
@@ -75,6 +77,15 @@ export interface ToolCallContextOptions {
 const PROGRESS_NOTIFICATION_FAILED_MESSAGE = 'progress notification failed';
 const CALLER_CANCELLED_MESSAGE = 'caller cancelled, sign-in continues in background';
 const NEWER_TOKEN_FOUND_MESSAGE = 'newer token found in token file';
+const NO_TOKEN_FILE_MESSAGE = 'no token file, sign-in required';
+const UNAUTHORIZED_RECEIVED_MESSAGE = '401 received, checking token file';
+const BACKGROUND_SIGN_IN_SKIPPED_MESSAGE = 'background request needs sign-in, skipped';
+const CANCELLED_ATTEMPT_WAIT_MESSAGE = 'previous sign-in attempt was cancelled, waiting for it to finish';
+const CANCELLED_CALL_AFTER_WAIT_MESSAGE = 'caller cancelled while waiting for the cancelled attempt, no new sign-in started';
+const JOINING_SIGN_IN_MESSAGE = 'joining sign-in already in progress';
+const LOCK_RELEASED_WITHOUT_TOKEN_MESSAGE = 'login lock released, token file unchanged';
+const SESSION_TOKEN_SAVED_MESSAGE = 'session token saved';
+const LOCK_LOST_DURING_INSTALLATION_MESSAGE = 'login lock lost during Chromium installation';
 
 export function createToolCallContext(options: ToolCallContextOptions): RequestCallContext {
   const { progressToken, sendProgressNotification, cancellationSignal, logger } = options;
@@ -111,18 +122,17 @@ export async function awaitWithProgress<Result>(
   /** Текущее состояние для текста уведомления */
   describeStatus: () => string = () => LOGIN_PROGRESS_MESSAGE,
 ): Promise<Result> {
-  const { reportProgress, cancellationSignal, logger } = callContext;
+  const { reportProgress, cancellationSignal, logger, authenticationState } = callContext;
   if (reportProgress === undefined || cancellationSignal?.aborted) {
     return operation;
   }
 
   const startedAtMilliseconds = clock.now();
-  let previousProgress = 0;
   let tickerStopped = false;
   const intervalHandle = clock.setInterval(() => {
     const elapsedSeconds = Math.floor((clock.now() - startedAtMilliseconds) / MILLISECONDS_PER_SECOND);
-    const progress = Math.max(previousProgress + 1, elapsedSeconds);
-    previousProgress = progress;
+    const progress = Math.max((authenticationState.lastReportedProgress ?? 0) + 1, elapsedSeconds);
+    authenticationState.lastReportedProgress = progress;
     reportProgress({ progress, message: `${describeStatus()} (${progress} s)` });
   }, intervalMilliseconds);
   const stopTicker = (): void => {
@@ -182,6 +192,7 @@ export interface BrowserAuthenticationSessionDependencies {
 
 interface RecoveryAttemptState {
   statusMessage: string;
+  startedAtMilliseconds: number;
   interestedCallCount: number;
   /** Существует только пока идёт установка Chromium */
   installationAbortController: AbortController | undefined;
@@ -234,7 +245,7 @@ export class BrowserAuthenticationSession implements TokenProvider {
     const storedToken = await this.tokenStore.readToken(this.siteUrl);
     const present = storedToken !== undefined;
     if (!present && this.tokenFilePresent !== false) {
-      this.logger('no token file, sign-in required');
+      this.logger(NO_TOKEN_FILE_MESSAGE);
     }
     this.tokenFilePresent = present;
     if (storedToken !== undefined) {
@@ -244,7 +255,7 @@ export class BrowserAuthenticationSession implements TokenProvider {
   }
 
   async recoverFromUnauthorized(rejectedToken: string, callContext: RequestCallContext): Promise<string | undefined> {
-    this.logger('401 received, checking token file');
+    this.logger(UNAUTHORIZED_RECEIVED_MESSAGE);
     return this.acquireFreshToken(rejectedToken, callContext);
   }
 
@@ -257,7 +268,7 @@ export class BrowserAuthenticationSession implements TokenProvider {
       }
 
       if (!callContext.interactive) {
-        this.logger('background request needs sign-in, skipped');
+        this.logger(BACKGROUND_SIGN_IN_SKIPPED_MESSAGE);
         throw new MattermostAuthenticationError(
           AUTHENTICATION_ERROR_CODES.AUTHENTICATION_REQUIRED,
           'Mattermost sign-in is required, but background requests do not open the sign-in window. Call any Mattermost tool to sign in.',
@@ -269,7 +280,7 @@ export class BrowserAuthenticationSession implements TokenProvider {
         this.pendingRecovery !== undefined && !this.pendingRecovery.settled ? this.pendingRecovery : undefined;
 
       if (activeRecovery !== undefined && activeRecovery.installationCancelled) {
-        this.logger('previous sign-in attempt was cancelled, waiting for it to finish');
+        this.logger(CANCELLED_ATTEMPT_WAIT_MESSAGE);
         await awaitWithProgress(
           activeRecovery.promise.catch(() => undefined),
           callContext,
@@ -277,12 +288,19 @@ export class BrowserAuthenticationSession implements TokenProvider {
           this.clock,
           () => activeRecovery.statusMessage,
         );
+        if (callContext.cancellationSignal?.aborted) {
+          this.logger(CANCELLED_CALL_AFTER_WAIT_MESSAGE);
+          throw new MattermostAuthenticationError(
+            AUTHENTICATION_ERROR_CODES.LOGIN_NOT_COMPLETED,
+            'The tool call was cancelled while waiting for the previous Mattermost sign-in attempt. Retry the tool call.',
+          );
+        }
         continue;
       }
 
       if (activeRecovery !== undefined) {
         authenticationState.browserLoginStarted = true;
-        this.logger('joining sign-in already in progress');
+        this.logger(JOINING_SIGN_IN_MESSAGE);
         this.registerInterest(activeRecovery, callContext);
         return awaitWithProgress(
           activeRecovery.promise,
@@ -316,12 +334,13 @@ export class BrowserAuthenticationSession implements TokenProvider {
   private startRecovery(rejectedToken: string | undefined): PendingRecovery {
     const attemptState: RecoveryAttemptState = {
       statusMessage: LOGIN_PROGRESS_MESSAGE,
+      startedAtMilliseconds: this.clock.now(),
       interestedCallCount: 0,
       installationAbortController: undefined,
       installationCancelled: false,
       settled: false,
     };
-    const deadlineMilliseconds = this.clock.now() + this.timings.loginTimeoutMilliseconds;
+    const deadlineMilliseconds = attemptState.startedAtMilliseconds + this.timings.loginTimeoutMilliseconds;
     const recovery: PendingRecovery = Object.assign(attemptState, {
       promise: this.recoverAcrossProcesses(rejectedToken, deadlineMilliseconds, attemptState).finally(() => {
         /* settled выставляется до обнуления ссылки, поэтому вызов, увидевший этот объект позже, к нему не присоединится */
@@ -364,18 +383,19 @@ export class BrowserAuthenticationSession implements TokenProvider {
     return storedToken;
   }
 
-  private createWaitTimeoutError(): MattermostAuthenticationError {
-    const loginTimeoutSeconds = toSeconds(this.timings.loginTimeoutMilliseconds);
-    this.logger(`sign-in timed out after ${loginTimeoutSeconds} s (no browser window in this process)`);
+  private createWaitTimeoutError(recovery: RecoveryAttemptState): MattermostAuthenticationError {
+    const waitedSeconds = toSeconds(this.clock.now() - recovery.startedAtMilliseconds);
+    this.logger(`sign-in timed out after ${waitedSeconds} s (no browser window in this process)`);
     return new MattermostAuthenticationError(
       AUTHENTICATION_ERROR_CODES.LOGIN_TIMEOUT,
-      `Mattermost sign-in did not complete within ${loginTimeoutSeconds} s. Complete the sign-in in the browser window and retry the tool call.`,
+      `Mattermost sign-in did not complete within ${waitedSeconds} s. Complete the sign-in in the browser window and retry the tool call.`,
     );
   }
 
   /**
-   * Цикл ожидания без лимита итераций. Процесс, заметивший претендента на блокировку, своё окно не открывает:
-   * он ждёт файл токена, а после двух подряд шагов со свободной блокировкой возвращает LOGIN_NOT_COMPLETED
+   * Цикл ожидания без лимита итераций. Процесс, заметивший претендента на блокировку, свободную блокировку
+   * больше не захватывает: после двух подряд шагов со свободной блокировкой он возвращает LOGIN_NOT_COMPLETED.
+   * Устаревшую блокировку он по-прежнему берёт через tryBreakStale и тогда открывает окно сам
    */
   private async recoverAcrossProcesses(
     rejectedToken: string | undefined,
@@ -395,7 +415,7 @@ export class BrowserAuthenticationSession implements TokenProvider {
         return newerToken;
       }
       if (this.clock.now() >= deadlineMilliseconds) {
-        throw this.createWaitTimeoutError();
+        throw this.createWaitTimeoutError(recovery);
       }
 
       const state = await this.loginLock.inspect();
@@ -413,7 +433,7 @@ export class BrowserAuthenticationSession implements TokenProvider {
             if (confirmedToken !== undefined) {
               return confirmedToken;
             }
-            this.logger('login lock released, token file unchanged');
+            this.logger(LOCK_RELEASED_WITHOUT_TOKEN_MESSAGE);
             throw new MattermostAuthenticationError(
               AUTHENTICATION_ERROR_CODES.LOGIN_NOT_COMPLETED,
               'Mattermost sign-in in another process ended without a new session token. Retry the tool call to open the sign-in window.',
@@ -466,16 +486,23 @@ export class BrowserAuthenticationSession implements TokenProvider {
     }
   }
 
-  /** Предел продления равен границе полного удержания блокировки держателем при первой загрузке Chromium */
+  /**
+   * Предел продления равен границе полного удержания блокировки держателем при первой загрузке Chromium.
+   * После срока входа шаг держателя ещё читает cookie, проверяет токен и закрывает окно
+   */
   private calculateExtensionLimit(firstObservedAtByNonce: Map<string, number>, record: LoginLockRecord): number {
     const firstObservedAtMilliseconds = firstObservedAtByNonce.get(record.nonce) ?? this.clock.now();
+    const holderLoginStepAllowanceMilliseconds =
+      this.timings.cookieReadTimeoutMilliseconds +
+      this.timings.tokenValidationTimeoutMilliseconds +
+      this.timings.browserCloseTimeoutMilliseconds;
     return (
       firstObservedAtMilliseconds +
       this.timings.browserInstallationTimeoutMilliseconds +
       2 * this.timings.installationTerminationGraceMilliseconds +
       2 * this.timings.lockReleaseTimeoutMilliseconds +
       this.timings.loginTimeoutMilliseconds +
-      HOLDER_LOGIN_STEP_ALLOWANCE_MILLISECONDS
+      holderLoginStepAllowanceMilliseconds
     );
   }
 
@@ -491,7 +518,7 @@ export class BrowserAuthenticationSession implements TokenProvider {
         return newerToken;
       }
       if (this.clock.now() >= deadlineMilliseconds) {
-        throw this.createWaitTimeoutError();
+        throw this.createWaitTimeoutError(recovery);
       }
 
       let loginDeadlineMilliseconds = deadlineMilliseconds;
@@ -512,7 +539,7 @@ export class BrowserAuthenticationSession implements TokenProvider {
       });
       /* Токен пишется до снятия блокировки: ожидающий после её снятия должен увидеть новый файл */
       await this.tokenStore.writeToken(this.siteUrl, token);
-      this.logger('session token saved');
+      this.logger(SESSION_TOKEN_SAVED_MESSAGE);
       return token;
     } finally {
       await heldLock.release();
@@ -577,7 +604,7 @@ export class BrowserAuthenticationSession implements TokenProvider {
         if (renewalResult === 'lost') {
           installationAbortController.abort(INSTALLATION_ABORT_REASONS.LOCK_LOST);
           installationOutcome = await installationOutcomePromise;
-          this.logger('login lock lost during Chromium installation');
+          this.logger(LOCK_LOST_DURING_INSTALLATION_MESSAGE);
           throw new MattermostAuthenticationError(
             AUTHENTICATION_ERROR_CODES.LOGIN_NOT_COMPLETED,
             'The Mattermost login lock was lost during Chromium installation. Retry the tool call.',
@@ -626,7 +653,7 @@ export function createTokenValidator(
   fetchImplementation: HttpFetch,
   timeoutMilliseconds: number,
 ): (candidateToken: string) => Promise<TokenValidationResult> {
-  const currentUserUrl = `${apiBaseUrl.replace(/\/+$/, '')}${CURRENT_USER_API_PATH}`;
+  const currentUserUrl = `${apiBaseUrl.replace(TRAILING_SLASHES_PATTERN, '')}${CURRENT_USER_API_PATH}`;
   return async (candidateToken) => {
     try {
       const response = await fetchImplementation(currentUserUrl, {
