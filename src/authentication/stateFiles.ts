@@ -24,7 +24,7 @@ import {
   TOKEN_FILE_NAME,
   TRAILING_SLASHES_PATTERN,
 } from './constants.js';
-import { AuthenticationLogger, MattermostAuthenticationError, getErrorCode } from './runtime.js';
+import { AuthenticationLogger, MattermostAuthenticationError, getErrorCode, isProcessAlive } from './runtime.js';
 
 const PERMISSION_BITS_MASK = 0o777;
 const SHARED_WRITE_PERMISSION_BITS = 0o022;
@@ -212,15 +212,6 @@ function describeUnsafeTokenFile(stats: Stats): string | undefined {
   return undefined;
 }
 
-function isProcessRunning(processId: number): boolean {
-  try {
-    process.kill(processId, 0);
-    return true;
-  } catch (error) {
-    return getErrorCode(error) !== FILE_SYSTEM_ERROR_CODES.NO_SUCH_PROCESS;
-  }
-}
-
 /* Временный файл с токеном переживает SIGKILL писателя; PID в имени показывает, что писателя уже нет */
 async function removeAbandonedTemporaryTokenFiles(tokenFilePath: string): Promise<void> {
   const directory = dirname(tokenFilePath);
@@ -232,7 +223,7 @@ async function removeAbandonedTemporaryTokenFiles(tokenFilePath: string): Promis
         return;
       }
       const processIdText = entryName.slice(temporaryFilePrefix.length).split(TEMPORARY_FILE_NAME_SEPARATOR)[0];
-      if (!PROCESS_ID_PATTERN.test(processIdText) || isProcessRunning(Number(processIdText))) {
+      if (!PROCESS_ID_PATTERN.test(processIdText) || isProcessAlive(Number(processIdText))) {
         return;
       }
       await unlink(join(directory, entryName)).catch(() => undefined);

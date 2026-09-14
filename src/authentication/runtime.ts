@@ -2,6 +2,8 @@ import {
   ABORT_EVENT,
   AUTHENTICATION_ERROR_CODES,
   AUTHENTICATION_LOG_PREFIX,
+  FILE_SYSTEM_ERROR_CODES,
+  MILLISECONDS_PER_SECOND,
   SHUTDOWN_SIGNALS,
 } from './constants.js';
 
@@ -28,6 +30,19 @@ export function getErrorCode(error: unknown): string | undefined {
 export function getErrorFirstLine(error: unknown): string {
   const text = error instanceof Error ? error.message : String(error);
   return text.split('\n').find((line) => line.trim().length > 0)?.trim() ?? text.trim();
+}
+
+export function toSeconds(milliseconds: number): number {
+  return Math.round(milliseconds / MILLISECONDS_PER_SECOND);
+}
+
+export function isProcessAlive(processId: number): boolean {
+  try {
+    process.kill(processId, 0);
+    return true;
+  } catch (error) {
+    return getErrorCode(error) !== FILE_SYSTEM_ERROR_CODES.NO_SUCH_PROCESS;
+  }
 }
 
 export type AuthenticationLogger = (message: string) => void;

@@ -19,7 +19,9 @@ import {
   ensureStateDirectory,
   resolveStatePaths,
 } from '../../src/authentication/stateFiles.js';
-import { PERMISSION_BITS_MASK } from '../fixtures/fixtureConstants.js';
+import { createLogCapture } from '../fixtures/captureLogs.js';
+import { MAKE_FIFO_COMMAND, PERMISSION_BITS_MASK } from '../fixtures/fixtureConstants.js';
+import { removeDirectories } from '../fixtures/runProcess.js';
 
 const SITE_URL = 'https://chat.example.test';
 const OTHER_SITE_URL = 'https://other.example.test';
@@ -29,23 +31,15 @@ const SHARED_WRITABLE_DIRECTORY_MODE = 0o777;
 const SHARED_WRITABLE_STICKY_DIRECTORY_MODE = 0o1777;
 const GROUP_WRITABLE_UMASK = 0o002;
 const SPECIAL_FILE_TEST_TIMEOUT_MILLISECONDS = 5_000;
-const MAKE_FIFO_COMMAND = 'mkfifo';
 
 const temporaryDirectories: string[] = [];
 
-after(async () => {
-  await Promise.all(temporaryDirectories.map((directory) => rm(directory, { recursive: true, force: true })));
-});
+after(() => removeDirectories(temporaryDirectories));
 
 async function createTemporaryHome(): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), 'mattermost-mcp-state-files-'));
   temporaryDirectories.push(directory);
   return directory;
-}
-
-function createLogSpy(): { logger: (message: string) => void; messages: string[] } {
-  const messages: string[] = [];
-  return { logger: (message) => messages.push(message), messages };
 }
 
 async function readPermissionBits(filePath: string): Promise<number> {
@@ -68,7 +62,7 @@ test('S1: resolveStatePaths builds seven paths inside the state directory', () =
 
 test('S2: token write sets private permissions and tightens existing ones', async () => {
   const freshPaths = resolveStatePaths(await createTemporaryHome());
-  const freshStore = createFileTokenStore(freshPaths, createLogSpy().logger);
+  const freshStore = createFileTokenStore(freshPaths, createLogCapture().logger);
   await freshStore.writeToken(SITE_URL, 'secret-token-0001');
   assert.equal(await readPermissionBits(freshPaths.stateDirectory), PRIVATE_DIRECTORY_MODE);
   assert.equal(await readPermissionBits(freshPaths.tokenFilePath), PRIVATE_FILE_MODE);
@@ -78,7 +72,7 @@ test('S2: token write sets private permissions and tightens existing ones', asyn
   await chmod(existingPaths.stateDirectory, 0o755);
   await writeFile(existingPaths.tokenFilePath, 'old content');
   await chmod(existingPaths.tokenFilePath, 0o644);
-  const existingStore = createFileTokenStore(existingPaths, createLogSpy().logger);
+  const existingStore = createFileTokenStore(existingPaths, createLogCapture().logger);
   await existingStore.writeToken(SITE_URL, 'secret-token-0002');
   assert.equal(await readPermissionBits(existingPaths.stateDirectory), PRIVATE_DIRECTORY_MODE);
   assert.equal(await readPermissionBits(existingPaths.tokenFilePath), PRIVATE_FILE_MODE);
@@ -93,7 +87,7 @@ test('S3: symbolic link state directory is rejected and nothing is written', asy
   await mkdir(join(homeDirectory, '.config'));
   await symlink(linkTarget, paths.stateDirectory);
 
-  const store = createFileTokenStore(paths, createLogSpy().logger);
+  const store = createFileTokenStore(paths, createLogCapture().logger);
   await assert.rejects(store.writeToken(SITE_URL, 'secret-token-0003'), (error: unknown) => {
     assert.ok(error instanceof MattermostAuthenticationError);
     assert.equal(error.code, AUTHENTICATION_ERROR_CODES.STATE_DIRECTORY_UNSAFE);
@@ -106,7 +100,7 @@ test('S3: symbolic link state directory is rejected and nothing is written', asy
 
 test('S4: missing, malformed and foreign token files are ignored with logs on state change only', async () => {
   const paths = resolveStatePaths(await createTemporaryHome());
-  const { logger, messages } = createLogSpy();
+  const { logger, messages } = createLogCapture();
   const store = createFileTokenStore(paths, logger);
 
   assert.equal(await store.readToken(SITE_URL), undefined);
@@ -135,7 +129,7 @@ test('S4: missing, malformed and foreign token files are ignored with logs on st
 
 test('S5: token write leaves no temporary files', async () => {
   const paths = resolveStatePaths(await createTemporaryHome());
-  const store = createFileTokenStore(paths, createLogSpy().logger);
+  const store = createFileTokenStore(paths, createLogCapture().logger);
   await store.writeToken(SITE_URL, 'secret-token-0005');
   await store.writeToken(SITE_URL, 'secret-token-0006');
   const entries = await readdir(paths.stateDirectory);
@@ -145,7 +139,7 @@ test('S5: token write leaves no temporary files', async () => {
 
 test('S6: parallel writes and reads never observe values outside the written set', async () => {
   const paths = resolveStatePaths(await createTemporaryHome());
-  const store = createFileTokenStore(paths, createLogSpy().logger);
+  const store = createFileTokenStore(paths, createLogCapture().logger);
   const writtenTokens = Array.from({ length: 50 }, (_, index) => `secret-token-parallel-${index}`);
 
   const writes: Array<Promise<void>> = [];
@@ -167,7 +161,7 @@ test('S6: parallel writes and reads never observe values outside the written set
 });
 
 async function readTokenWithFreshStore(paths: StatePaths): Promise<{ token: string | undefined; messages: string[] }> {
-  const { logger, messages } = createLogSpy();
+  const { logger, messages } = createLogCapture();
   const token = await createFileTokenStore(paths, logger).readToken(SITE_URL);
   return { token, messages };
 }
@@ -185,7 +179,7 @@ test(
   async () => {
     const homeDirectory = await createTemporaryHome();
     const paths = resolveStatePaths(homeDirectory);
-    await createFileTokenStore(paths, createLogSpy().logger).writeToken(SITE_URL, 'secret-token-0007');
+    await createFileTokenStore(paths, createLogCapture().logger).writeToken(SITE_URL, 'secret-token-0007');
 
     await chmod(paths.tokenFilePath, WIDE_FILE_MODE);
     const widePermissionsResult = await readTokenWithFreshStore(paths);
@@ -276,7 +270,7 @@ test('S9: token write removes temporary token files of dead processes only', asy
     await writeFile(join(paths.stateDirectory, fileName), 'secret-token-abandoned', { mode: PRIVATE_FILE_MODE });
   }
 
-  const store = createFileTokenStore(paths, createLogSpy().logger);
+  const store = createFileTokenStore(paths, createLogCapture().logger);
   await store.writeToken(SITE_URL, 'secret-token-0009');
 
   const entries = await readdir(paths.stateDirectory);
@@ -289,7 +283,7 @@ test('S10: a parent of the state directory writable by group or others without t
   const homeDirectory = await createTemporaryHome();
   const paths = resolveStatePaths(homeDirectory);
   const configDirectory = join(homeDirectory, '.config');
-  const store = createFileTokenStore(paths, createLogSpy().logger);
+  const store = createFileTokenStore(paths, createLogCapture().logger);
 
   for (const unsafeDirectory of [homeDirectory, configDirectory]) {
     await mkdir(configDirectory, { recursive: true });

@@ -25,6 +25,7 @@ import {
   AuthenticationTimings,
   EXCLUSIVE_CREATE_FLAG,
   FILE_SYSTEM_ERROR_CODES,
+  MILLISECONDS_PER_SECOND,
   PRIVATE_FILE_MODE,
   PROCESS_EXIT_EVENT,
   SYMBOLIC_LINK_LOOP_ERROR_CODE,
@@ -32,8 +33,10 @@ import {
   TEXT_FILE_ENCODING,
   UNKNOWN_ERROR_CODE,
 } from './constants.js';
-import { AuthenticationLogger, Clock, getErrorCode, systemClock } from './runtime.js';
+import { AuthenticationLogger, Clock, getErrorCode, isProcessAlive, systemClock } from './runtime.js';
 import { StatePaths, ensureStateDirectory } from './stateFiles.js';
+
+export { isProcessAlive };
 
 export interface LoginLockRecord {
   processId: number;
@@ -82,7 +85,6 @@ interface LockOwnership {
   released: boolean;
 }
 
-const MILLISECONDS_IN_SECOND = 1_000;
 /* process.kill принимает только 32-битный PID со знаком, на большем он бросает не ESRCH, и процесс выглядел бы живым */
 const MAXIMUM_PROCESS_ID = 0x7fffffff;
 const LOCK_FILE_OPEN_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
@@ -91,15 +93,6 @@ const UNREADABLE_LOCK_FILE_CONTENT = '';
 
 /* Набор общий для всех экземпляров в процессе, иначе чужой экземпляр счёл бы живую свою запись брошенной */
 const ownedLockNonces = new Set<string>();
-
-export function isProcessAlive(processId: number): boolean {
-  try {
-    process.kill(processId, 0);
-    return true;
-  } catch (error) {
-    return getErrorCode(error) !== FILE_SYSTEM_ERROR_CODES.NO_SUCH_PROCESS;
-  }
-}
 
 function serializeRecord(record: LoginLockRecord): string {
   return JSON.stringify(record);
@@ -309,7 +302,7 @@ export class LoginLock {
     }
     const ageMilliseconds = this.clock.now() - record.createdAtMilliseconds;
     if (ageMilliseconds > this.timings.lockStaleAgeMilliseconds) {
-      return `age ${Math.floor(ageMilliseconds / MILLISECONDS_IN_SECOND)} s`;
+      return `age ${Math.floor(ageMilliseconds / MILLISECONDS_PER_SECOND)} s`;
     }
     if (record.processId === process.pid && !ownedLockNonces.has(record.nonce)) {
       return 'own process with unknown nonce';

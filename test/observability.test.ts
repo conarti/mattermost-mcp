@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
@@ -10,16 +10,15 @@ import { advanceClockUntilSettled, trackPromise } from './fixtures/asyncControl.
 import { assertNoSecrets, assertOrderedFragments } from './fixtures/captureLogs.js';
 import { FakeClock } from './fixtures/fakeClock.js';
 import { FakeLoginBrowserContext, FakeLoginBrowserLauncher } from './fixtures/fakeLoginBrowser.js';
+import { FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS } from './fixtures/fixtureConstants.js';
+import { removeDirectories } from './fixtures/runProcess.js';
 
 const START_MILLISECONDS = 1_000_000_000_000;
-const FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS = 5_000;
 const FRESH_TOKEN = 'fresh-secret-token-0003';
 
 const temporaryDirectories: string[] = [];
 
-after(async () => {
-  await Promise.all(temporaryDirectories.map((directory) => rm(directory, { recursive: true, force: true })));
-});
+after(() => removeDirectories(temporaryDirectories));
 
 function createResponse(status: number): HttpResponse {
   return {

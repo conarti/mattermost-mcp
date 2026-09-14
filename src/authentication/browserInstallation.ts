@@ -28,7 +28,6 @@ import {
   INSTALLATION_TEMPORARY_DIRECTORY_PREFIX,
   INSTALLER_KILL_SIGNAL,
   INSTALLER_TERMINATION_SIGNAL,
-  MILLISECONDS_PER_SECOND,
   PINNED_PLAYWRIGHT_VERSION,
   PLAYWRIGHT_BROWSERS_PATH_VARIABLE,
   PLAYWRIGHT_CLI_FILE_NAME,
@@ -58,6 +57,7 @@ import {
   getErrorCode,
   getErrorFirstLine,
   systemClock,
+  toSeconds,
 } from './runtime.js';
 import { ensurePrivateDirectory } from './stateFiles.js';
 
@@ -339,10 +339,6 @@ function isSpawnError(error: Error): boolean {
 
 function describeAbortReason(signal: AbortSignal): string {
   return typeof signal.reason === 'string' ? signal.reason : INSTALLATION_ABORT_REASONS.CANCELLED;
-}
-
-function toSeconds(milliseconds: number): number {
-  return Math.round(milliseconds / MILLISECONDS_PER_SECOND);
 }
 
 export function createBrowserInstaller(dependencies: BrowserInstallerDependencies): InstallBrowser {

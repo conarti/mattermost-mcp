@@ -14,7 +14,6 @@ import {
   LOGIN_PAGE_PATH,
   LOGIN_PAGE_WAIT_CONDITION,
   LOGIN_WAITING_LOG_INTERVAL_MILLISECONDS,
-  MILLISECONDS_PER_SECOND,
   MISSING_BROWSER_EXECUTABLE_MARKER,
   MISSING_SANDBOX_MARKERS,
   MISSING_SYSTEM_DEPENDENCIES_MARKER,
@@ -34,6 +33,7 @@ import {
   MattermostAuthenticationError,
   getErrorFirstLine,
   systemClock,
+  toSeconds,
 } from './runtime.js';
 import { StatePaths, ensurePrivateDirectory, ensureStateDirectory } from './stateFiles.js';
 
@@ -60,7 +60,7 @@ export function buildLoginPageUrl(siteUrl: string): string {
 }
 
 /** Путь cookie сравнивается через pathname.startsWith(cookie.path), поэтому адрес заканчивается на / */
-export function buildSessionCookieUrl(siteUrl: string): string {
+function buildSessionCookieUrl(siteUrl: string): string {
   return `${siteUrl}${SESSION_COOKIE_URL_PATH}`;
 }
 
@@ -135,7 +135,7 @@ export function buildChromiumInstallCommand(browsersDirectory: string): string {
   ].join(' ');
 }
 
-export function buildSystemDependenciesInstallCommand(): string {
+function buildSystemDependenciesInstallCommand(): string {
   return ['sudo', 'npx', PLAYWRIGHT_NPX_PACKAGE, ...SYSTEM_DEPENDENCIES_INSTALL_ARGUMENTS].join(' ');
 }
 
@@ -317,10 +317,6 @@ async function raceWithClock<T>(operation: Promise<T>, milliseconds: number, clo
   }
 }
 
-function toSeconds(milliseconds: number): number {
-  return Math.round(milliseconds / MILLISECONDS_PER_SECOND);
-}
-
 const SESSION_COOKIE_NOT_FOUND_DESCRIPTION = 'session cookie not found';
 const SESSION_COOKIE_ALREADY_REJECTED_DESCRIPTION = 'session cookie was already rejected';
 const LOGIN_NOT_STARTED_DESCRIPTION = 'sign-in window was not opened';
@@ -397,15 +393,17 @@ export function createBrowserLogin(dependencies: BrowserLoginDependencies): Perf
 
     const isCandidateAccepted = async (candidate: string): Promise<boolean> => {
       const outcome = await raceWithClock(validateToken(candidate), timings.tokenValidationTimeoutMilliseconds, clock);
-      const result: TokenValidationResult =
-        outcome.kind === 'settled'
-          ? outcome.value
-          : outcome.kind === 'timed-out'
-            ? {
-                kind: 'unavailable',
-                statusDescription: `token validation timed out after ${toSeconds(timings.tokenValidationTimeoutMilliseconds)} s`,
-              }
-            : { kind: 'unavailable', statusDescription: `token validation failed (${getErrorFirstLine(outcome.error)})` };
+      let result: TokenValidationResult;
+      if (outcome.kind === 'settled') {
+        result = outcome.value;
+      } else if (outcome.kind === 'timed-out') {
+        result = {
+          kind: 'unavailable',
+          statusDescription: `token validation timed out after ${toSeconds(timings.tokenValidationTimeoutMilliseconds)} s`,
+        };
+      } else {
+        result = { kind: 'unavailable', statusDescription: `token validation failed (${getErrorFirstLine(outcome.error)})` };
+      }
       lastCheckDescription = result.statusDescription;
       if (result.kind === 'valid') {
         return true;

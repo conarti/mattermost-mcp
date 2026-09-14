@@ -67,12 +67,12 @@ import {
   createFakeTokenValidator,
 } from '../fixtures/fakeLogin.js';
 import { FakeCookieStep, FakeLoginBrowserContext, FakeLoginBrowserLauncher } from '../fixtures/fakeLoginBrowser.js';
-import { PERMISSION_BITS_MASK } from '../fixtures/fixtureConstants.js';
+import { FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS, PERMISSION_BITS_MASK } from '../fixtures/fixtureConstants.js';
+import { removeDirectories } from '../fixtures/runProcess.js';
 
 const START_MILLISECONDS = 1_000_000_000_000;
 const LIVE_FOREIGN_PROCESS_ID = 424242;
 const DEAD_PROCESS_ID = 424243;
-const FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS = 5_000;
 const LONG_FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS = 15_000;
 const CANCELLED_ATTEMPT_WAIT_LOG = 'previous sign-in attempt was cancelled, waiting for it to finish';
 const CANCELLED_ATTEMPT_WAIT_LOG_LIMIT = 10;
@@ -95,9 +95,7 @@ const WRITE_TOKEN_EVENT = 'writeToken';
 
 const temporaryDirectories: string[] = [];
 
-after(async () => {
-  await Promise.all(temporaryDirectories.map((directory) => rm(directory, { recursive: true, force: true })));
-});
+after(() => removeDirectories(temporaryDirectories));
 
 function fakeIsProcessAlive(processId: number): boolean {
   return processId !== DEAD_PROCESS_ID;

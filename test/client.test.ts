@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { access, mkdtemp, rm } from 'node:fs/promises';
+import { access, mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
@@ -26,9 +26,10 @@ import { assertNoSecrets, createLogCapture } from './fixtures/captureLogs.js';
 import { FakeClock } from './fixtures/fakeClock.js';
 import { FakeHttp, FakeHttpRecord, FakeHttpReply, createTokenScenario } from './fixtures/fakeHttp.js';
 import { FakeLoginBrowserContext, FakeLoginBrowserLauncher } from './fixtures/fakeLoginBrowser.js';
+import { FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS } from './fixtures/fixtureConstants.js';
+import { removeDirectories } from './fixtures/runProcess.js';
 
 const START_MILLISECONDS = 1_000_000_000_000;
-const FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS = 5_000;
 const SITE_URL = 'https://chat.example.test';
 const MATTERMOST_URL = `${SITE_URL}/api/v4`;
 const SITE_HOSTNAME = new URL(SITE_URL).hostname;
@@ -53,9 +54,7 @@ const UNAUTHORIZED_REPLY: FakeHttpReply = { status: 401 };
 
 const temporaryDirectories: string[] = [];
 
-after(async () => {
-  await Promise.all(temporaryDirectories.map((directory) => rm(directory, { recursive: true, force: true })));
-});
+after(() => removeDirectories(temporaryDirectories));
 
 async function createTemporaryHome(): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), 'mattermost-mcp-client-'));

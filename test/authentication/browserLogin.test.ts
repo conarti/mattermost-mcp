@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { after, test } from 'node:test';
@@ -20,9 +20,11 @@ import {
 import { DEFAULT_AUTHENTICATION_TIMINGS, PRIVATE_DIRECTORY_MODE } from '../../src/authentication/constants.js';
 import { MattermostAuthenticationError } from '../../src/authentication/runtime.js';
 import { StatePaths, resolveStatePaths } from '../../src/authentication/stateFiles.js';
+import { TrackedPromise, flushAsyncWork, trackPromise } from '../fixtures/asyncControl.js';
 import { FakeClock } from '../fixtures/fakeClock.js';
 import { FakeCookieStep, FakeLoginBrowserContext, FakeLoginBrowserLauncher } from '../fixtures/fakeLoginBrowser.js';
 import { FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS, PERMISSION_BITS_MASK } from '../fixtures/fixtureConstants.js';
+import { removeDirectories } from '../fixtures/runProcess.js';
 
 const START_MILLISECONDS = 1_000_000_000_000;
 const SITE_URL = 'https://chat.example.test';
@@ -44,7 +46,7 @@ after(async () => {
   } else {
     process.env.PLAYWRIGHT_BROWSERS_PATH = originalBrowsersPath;
   }
-  await Promise.all(temporaryDirectories.map((directory) => rm(directory, { recursive: true, force: true })));
+  await removeDirectories(temporaryDirectories);
 });
 
 function sessionCookie(value: string, domain: string = SITE_HOSTNAME): FakeCookieStep {
@@ -52,28 +54,6 @@ function sessionCookie(value: string, domain: string = SITE_HOSTNAME): FakeCooki
     { name: 'OTHER', value: 'unrelated', domain },
     { name: 'MMAUTHTOKEN', value, domain },
   ];
-}
-
-function flushAsyncWork(): Promise<void> {
-  return new Promise<void>((resolve) => setImmediate(resolve));
-}
-
-interface TrackedPromise<T> {
-  readonly promise: Promise<T>;
-  settled: boolean;
-}
-
-function trackPromise<T>(promise: Promise<T>): TrackedPromise<T> {
-  const tracked: TrackedPromise<T> = { promise, settled: false };
-  promise.then(
-    () => {
-      tracked.settled = true;
-    },
-    () => {
-      tracked.settled = true;
-    },
-  );
-  return tracked;
 }
 
 async function advanceUntil(clock: FakeClock, condition: () => boolean): Promise<void> {

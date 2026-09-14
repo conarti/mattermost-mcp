@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { getEventListeners } from 'node:events';
 import { existsSync, mkdtempSync, statSync } from 'node:fs';
-import { chmod, lstat, mkdir, mkdtemp, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readdir, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
@@ -26,6 +26,7 @@ import {
   PRIVATE_DIRECTORY_MODE,
 } from '../../src/authentication/constants.js';
 import { MattermostAuthenticationError } from '../../src/authentication/runtime.js';
+import { TrackedPromise, flushAsyncWork, trackPromise } from '../fixtures/asyncControl.js';
 import { FakeClock } from '../fixtures/fakeClock.js';
 import {
   FakeInstallationLaunch,
@@ -34,6 +35,7 @@ import {
   FakeProcessEvents,
 } from '../fixtures/fakeInstallationProcess.js';
 import { FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS, PERMISSION_BITS_MASK } from '../fixtures/fixtureConstants.js';
+import { removeDirectories } from '../fixtures/runProcess.js';
 
 const START_MILLISECONDS = 1_000_000_000_000;
 /* Установщик создаёт папку сборок сам, поэтому она лежит во временной папке теста */
@@ -47,9 +49,7 @@ const MANUAL_COMMAND = buildChromiumInstallCommand(BROWSERS_DIRECTORY);
 
 const temporaryDirectories: string[] = [BROWSERS_ROOT_DIRECTORY];
 
-after(async () => {
-  await Promise.all(temporaryDirectories.map((directory) => rm(directory, { recursive: true, force: true })));
-});
+after(() => removeDirectories(temporaryDirectories));
 
 function buildProgressLine(percent: number, totalSizeDescription = '150.3 MiB'): string {
   const filledWidth = Math.floor((PROGRESS_BAR_WIDTH * percent) / 100);
@@ -72,28 +72,6 @@ const NPX_WARNING_BOX = wrapInAsciiBox([
   "installing your project's dependencies.",
 ]);
 
-function flushAsyncWork(): Promise<void> {
-  return new Promise<void>((resolve) => setImmediate(resolve));
-}
-
-interface TrackedPromise {
-  readonly promise: Promise<void>;
-  settled: boolean;
-}
-
-function trackPromise(promise: Promise<void>): TrackedPromise {
-  const tracked: TrackedPromise = { promise, settled: false };
-  promise.then(
-    () => {
-      tracked.settled = true;
-    },
-    () => {
-      tracked.settled = true;
-    },
-  );
-  return tracked;
-}
-
 interface InstallerTestContext {
   temporaryRootDirectory: string;
   clock: FakeClock;
@@ -102,7 +80,7 @@ interface InstallerTestContext {
   spawner: FakeInstallationSpawner;
   processEvents: FakeProcessEvents;
   abortController: AbortController;
-  start(): TrackedPromise;
+  start(): TrackedPromise<void>;
 }
 
 async function createInstallerTestContext(

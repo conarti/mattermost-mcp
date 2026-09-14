@@ -32,6 +32,7 @@ import { StatePaths, resolveStatePaths } from '../../src/authentication/stateFil
 import { FakeClock } from '../fixtures/fakeClock.js';
 import {
   EXIT_HANDLER_FIXTURE_MODES,
+  FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS,
   FIXTURE_FILE_NAMES,
   FIXTURE_KILL_SIGNAL,
   FIXTURE_OUTPUT_LINES,
@@ -41,12 +42,12 @@ import {
   OUTPUT_LINE_SEPARATOR,
   PERMISSION_BITS_MASK,
 } from '../fixtures/fixtureConstants.js';
+import { removeDirectories } from '../fixtures/runProcess.js';
 
 const START_MILLISECONDS = 1_000_000_000_000;
 const LIVE_FOREIGN_PROCESS_ID = 424242;
 const DEAD_PROCESS_ID = 424243;
 const MAXIMUM_VALID_PROCESS_ID = 2 ** 31 - 1;
-const FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS = 5_000;
 const CHILD_PROCESS_TEST_TIMEOUT_MILLISECONDS = 30_000;
 const SIGNAL_EXIT_DEADLINE_MILLISECONDS = 2_000;
 const CHILD_PROCESS_EXIT_DEADLINE_MILLISECONDS = 10_000;
@@ -61,7 +62,7 @@ after(async () => {
       child.kill(FIXTURE_KILL_SIGNAL);
     }
   }
-  await Promise.all(temporaryDirectories.map((directory) => rm(directory, { recursive: true, force: true })));
+  await removeDirectories(temporaryDirectories);
 });
 
 function fakeIsProcessAlive(processId: number): boolean {

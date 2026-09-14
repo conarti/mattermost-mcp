@@ -40,6 +40,7 @@ import {
   MattermostAuthenticationError,
   createStderrAuthenticationLogger,
   systemClock,
+  toSeconds,
 } from './runtime.js';
 import { StatePaths, TokenStore, createFileTokenStore, resolveStatePaths } from './stateFiles.js';
 
@@ -207,10 +208,6 @@ interface PendingRecovery extends RecoveryAttemptState {
 }
 
 type InstallationOutcome = { kind: 'succeeded' } | { kind: 'failed'; error: unknown };
-
-function toSeconds(milliseconds: number): number {
-  return Math.round(milliseconds / MILLISECONDS_PER_SECOND);
-}
 
 export class BrowserAuthenticationSession implements TokenProvider {
   readonly mode: AuthenticationMode = AUTHENTICATION_MODES.BROWSER;
