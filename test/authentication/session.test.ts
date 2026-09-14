@@ -828,7 +828,16 @@ test('N17: the token validator maps statuses, exceptions and timeouts', { timeou
     new Promise<HttpResponse>((_resolve, reject) => {
       request.signal?.addEventListener('abort', () => reject(request.signal?.reason), { once: true });
     });
-  assert.deepEqual(await validateToken('candidate-token-1'), { kind: 'unavailable', statusDescription: 'TimeoutError' });
+  /*
+   * Таймер AbortSignal.timeout не держит цикл событий, а фейковый fetch не открывает сокет. Раннер тестов Node 22,
+   * в отличие от Node 24, свой таймаут тоже не держит, и без этого таймера файл завершается до срабатывания сигнала
+   */
+  const eventLoopKeeper = setTimeout(() => undefined, FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS);
+  try {
+    assert.deepEqual(await validateToken('candidate-token-1'), { kind: 'unavailable', statusDescription: 'TimeoutError' });
+  } finally {
+    clearTimeout(eventLoopKeeper);
+  }
 });
 
 test('N18: the static token provider never touches the browser or the disk', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {

@@ -1,0 +1,46 @@
+name: Release
+
+# Релиз только с main: любая другая ветка не должна двигать версию на npm.
+on:
+  push:
+    branches:
+      - main
+
+# Права на уровне workflow минимальные, расширяются точечно в job.
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      # contents: write нужен плагину git (коммит CHANGELOG.md, package.json и
+      # package-lock.json) и плагину github (создание тега и релиза); issues и
+      # pull-requests нужны тому же плагину github, он комментирует закрытые задачи
+      # ссылкой на релиз; id-token нужен npm Trusted Publishing: OIDC токен GitHub
+      # обменивается на токен публикации, и пакет получает provenance.
+      contents: write
+      issues: write
+      pull-requests: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Полная история обязательна: semantic-release считает следующую версию
+          # по тегам и коммитам, на мелком клоне он их просто не увидит.
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # Сборка до semantic-release: плагин npm пакует уже готовый build,
+      # своей сборки он не запускает.
+      - run: npm run build
+      - run: npx semantic-release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Секрета NPM_TOKEN в репозитории нет, публикация идёт через OIDC. Пустое
+          # значение не мешает: плагин npm сначала пробует обмен OIDC токена и к
+          # NPM_TOKEN обращается, только если обмен не удался.
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}

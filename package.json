@@ -4,7 +4,7 @@
   "description": "Mattermost MCP Server",
   "repository": {
     "type": "git",
-    "url": "https://github.com/conarti/mattermost-mcp.git"
+    "url": "git+https://github.com/conarti/mattermost-mcp.git"
   },
   "author": "conarti",
   "main": "build/index.js",
@@ -17,7 +17,8 @@
     "postbuild": "chmod +x build/index.js",
     "start": "node build/index.js",
     "dev": "tsc && node build/index.js",
-    "test": "node -e \"require('node:fs').rmSync('build-test', { recursive: true, force: true })\" && tsc -p tsconfig.test.json && node --test --test-force-exit \"build-test/test/**/*.test.js\""
+    "test": "node -e \"require('node:fs').rmSync('build-test', { recursive: true, force: true })\" && tsc -p tsconfig.test.json && node --test --test-force-exit \"build-test/test/**/*.test.js\"",
+    "verify:package": "node scripts/verify-package.mjs"
   },
   "keywords": [
     "mattermost",
@@ -32,8 +33,15 @@
     "playwright": "1.63.0"
   },
   "devDependencies": {
+    "@semantic-release/changelog": "^7.0.0",
+    "@semantic-release/commit-analyzer": "^13.0.1",
+    "@semantic-release/git": "^11.0.1",
+    "@semantic-release/github": "^12.0.9",
+    "@semantic-release/npm": "^13.1.5",
+    "@semantic-release/release-notes-generator": "^14.1.1",
     "@types/node": "^20.11.0",
     "@types/node-cron": "^3.0.11",
+    "semantic-release": "^25.0.9",
     "typescript": "^5.3.3"
   },
   "files": [
