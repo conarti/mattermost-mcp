@@ -120,3 +120,6 @@ export const DEFAULT_AUTHENTICATION_TIMINGS: AuthenticationTimings = {
   installationTerminationGraceMilliseconds: 5_000,
   lockRenewIntervalMilliseconds: 30_000,
 };
+
+export const SYMBOLIC_LINK_LOOP_ERROR_CODE = 'ELOOP';
+export const NOT_DIRECTORY_ERROR_CODE = 'ENOTDIR';

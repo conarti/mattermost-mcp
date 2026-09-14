@@ -2,8 +2,6 @@ export const PERMISSION_BITS_MASK = 0o777;
 export const OUTPUT_LINE_SEPARATOR = '\n';
 export const FIXTURE_KILL_SIGNAL = 'SIGKILL';
 export const FIXTURE_TERMINATION_SIGNAL = 'SIGTERM';
-export const CHILD_PROCESS_CLOSE_EVENT = 'close';
-export const STREAM_DATA_EVENT = 'data';
 
 export const FIXTURE_FILE_NAMES = {
   LOCK_HOLDER: 'lockHolderProcess.js',

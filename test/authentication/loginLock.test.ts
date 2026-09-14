@@ -8,6 +8,8 @@ import type { Readable } from 'node:stream';
 import { after, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
+  CLOSE_EVENT,
+  DATA_EVENT,
   DEFAULT_AUTHENTICATION_TIMINGS,
   PRIVATE_DIRECTORY_MODE,
   PRIVATE_FILE_MODE,
@@ -28,7 +30,6 @@ import { systemClock } from '../../src/authentication/runtime.js';
 import { StatePaths, resolveStatePaths } from '../../src/authentication/stateFiles.js';
 import { FakeClock } from '../fixtures/fakeClock.js';
 import {
-  CHILD_PROCESS_CLOSE_EVENT,
   EXIT_HANDLER_FIXTURE_MODES,
   FIXTURE_FILE_NAMES,
   FIXTURE_KILL_SIGNAL,
@@ -37,7 +38,6 @@ import {
   LOCK_HOLDER_FIXTURE_MODES,
   OUTPUT_LINE_SEPARATOR,
   PERMISSION_BITS_MASK,
-  STREAM_DATA_EVENT,
 } from '../fixtures/fixtureConstants.js';
 
 const START_MILLISECONDS = 1_000_000_000_000;
@@ -502,13 +502,13 @@ function startFixtureProcess(fixtureFileName: string, fixtureArguments: string[]
   const outputListeners = new Set<() => void>();
   child.stdout.setEncoding(TEXT_FILE_ENCODING);
   child.stderr.setEncoding(TEXT_FILE_ENCODING);
-  child.stdout.on(STREAM_DATA_EVENT, (chunk: string) => {
+  child.stdout.on(DATA_EVENT, (chunk: string) => {
     standardOutput += chunk;
     for (const listener of outputListeners) {
       listener();
     }
   });
-  child.stderr.on(STREAM_DATA_EVENT, (chunk: string) => {
+  child.stderr.on(DATA_EVENT, (chunk: string) => {
     standardError += chunk;
   });
 
@@ -516,7 +516,7 @@ function startFixtureProcess(fixtureFileName: string, fixtureArguments: string[]
     child.once(PROCESS_EXIT_EVENT, (code, signal) => resolve({ code, signal }));
   });
   const closed = new Promise<void>((resolve) => {
-    child.once(CHILD_PROCESS_CLOSE_EVENT, () => resolve());
+    child.once(CLOSE_EVENT, () => resolve());
   });
 
   const waitForOutputLine = (line: string) =>
