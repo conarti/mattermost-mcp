@@ -1,0 +1,6 @@
+# [1.2.0](https://github.com/conarti/mattermost-mcp/compare/v1.1.2...v1.2.0) (2026-09-14)
+
+
+### Features
+
+* browser sign-in with automatic token refresh ([#2](https://github.com/conarti/mattermost-mcp/issues/2)) ([24e0800](https://github.com/conarti/mattermost-mcp/commit/24e08006e18d1e1d3cd859c1a9be93d7c6132d4b))
