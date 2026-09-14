@@ -64,6 +64,27 @@ export const PROCESS_EXIT_EVENT = 'exit';
 export const ABORT_EVENT = 'abort';
 export const SHUTDOWN_SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP'] as const;
 
+export const SERVER_PACKAGE_NAME = '@conarti/mattermost-mcp';
+export const PLAYWRIGHT_NPX_PACKAGE = `playwright@${PINNED_PLAYWRIGHT_VERSION}`;
+export const SYSTEM_DEPENDENCIES_INSTALL_ARGUMENTS = ['install-deps', 'chromium'] as const;
+export const SESSION_COOKIE_URL_PATH = '/';
+export const LOGIN_PAGE_WAIT_CONDITION = 'domcontentloaded';
+export const LOGIN_WAITING_LOG_INTERVAL_MILLISECONDS = 60_000;
+export const MILLISECONDS_PER_SECOND = 1_000;
+export const CLOSE_EVENT = 'close';
+export const ERROR_EVENT = 'error';
+export const DATA_EVENT = 'data';
+export const END_EVENT = 'end';
+export const INSTALLER_TERMINATION_SIGNAL = 'SIGTERM';
+export const INSTALLER_KILL_SIGNAL = 'SIGKILL';
+export const INSTALLATION_OUTPUT_LINE_LIMIT = 50;
+export const INSTALLATION_FAILURE_REASON_MAX_LENGTH = 500;
+export const STACK_TRACE_LINE_PATTERN = /^\s+at /;
+export const ASCII_BOX_LINE_PATTERN = /^\s*[╔║╚]/;
+export const ASCII_BOX_CHARACTERS_PATTERN = /[╔╗╚╝║═]/g;
+export const URL_CREDENTIALS_PATTERN = /\/\/[^\s/@:]+:[^\s/@]*@/g;
+export const REDACTED_URL_CREDENTIALS = '//***@';
+
 export interface AuthenticationTimings {
   loginTimeoutMilliseconds: number;
   progressIntervalMilliseconds: number;

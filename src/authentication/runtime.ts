@@ -24,6 +24,12 @@ export function getErrorCode(error: unknown): string | undefined {
   return undefined;
 }
 
+/** Первая строка текста ошибки: стек и многострочные рамки Playwright в сообщения не попадают */
+export function getErrorFirstLine(error: unknown): string {
+  const text = error instanceof Error ? error.message : String(error);
+  return text.split('\n').find((line) => line.trim().length > 0)?.trim() ?? text.trim();
+}
+
 export type AuthenticationLogger = (message: string) => void;
 
 export function createStderrAuthenticationLogger(): AuthenticationLogger {
