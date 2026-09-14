@@ -8,8 +8,16 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { tools, executeTool, setTopicMonitorInstance } from "./tools/index.js";
 import { MattermostClient } from "./client.js";
-import { loadConfig } from "./config.js";
+import { loadConfig, resolveAuthenticationMode } from "./config.js";
 import { TopicMonitor } from "./monitor/index.js";
+import { AUTHENTICATION_MODES, PROGRESS_NOTIFICATION_METHOD } from "./authentication/constants.js";
+import { createStderrAuthenticationLogger, installProcessShutdownHandlers } from "./authentication/runtime.js";
+import { createToolCallContext } from "./authentication/session.js";
+import { resolveStatePaths } from "./authentication/stateFiles.js";
+
+const AUTHENTICATION_MODE_LOG_PREFIX = "Auth mode:";
+
+const authenticationLogger = createStderrAuthenticationLogger();
 
 async function main() {
   // Check for command-line arguments
@@ -20,11 +28,18 @@ async function main() {
   
   // Load configuration
   const config = loadConfig();
-  
+  if (resolveAuthenticationMode(config) === AUTHENTICATION_MODES.BROWSER) {
+    console.error(
+      `${AUTHENTICATION_MODE_LOG_PREFIX} ${AUTHENTICATION_MODES.BROWSER} (state directory ${resolveStatePaths().stateDirectory})`
+    );
+  } else {
+    console.error(`${AUTHENTICATION_MODE_LOG_PREFIX} ${AUTHENTICATION_MODES.STATIC}`);
+  }
+
   // Initialize Mattermost client
   let client: MattermostClient;
   try {
-    client = new MattermostClient();
+    client = new MattermostClient({ config });
     console.error("Successfully initialized Mattermost client");
   } catch (error) {
     console.error("Failed to initialize Mattermost client:", error);
@@ -37,9 +52,14 @@ async function main() {
     try {
       console.error("Initializing topic monitor...");
       topicMonitor = new TopicMonitor(client, config.monitoring);
-      // Set the TopicMonitor instance in the monitoring tool
-      setTopicMonitorInstance(topicMonitor);
-      await topicMonitor.start();
+      /* В браузерном режиме start() без токена отклоняется: неинициализированный экземпляр не отдаётся инструменту, и тот создаст свой после входа */
+      if (client.authenticationMode === AUTHENTICATION_MODES.BROWSER) {
+        await topicMonitor.start();
+        setTopicMonitorInstance(topicMonitor);
+      } else {
+        setTopicMonitorInstance(topicMonitor);
+        await topicMonitor.start();
+      }
       console.error("Topic monitor started successfully");
     } catch (error) {
       console.error("Failed to initialize topic monitor:", error);
@@ -48,7 +68,12 @@ async function main() {
   } else {
     console.error("Topic monitoring is disabled in configuration");
   }
-  
+
+  /* Окно Chromium может быть открыто во время вызова: сервер завершается по SIGTERM и SIGHUP, а обработчик exit Playwright закрывает браузер */
+  if (client.authenticationMode === AUTHENTICATION_MODES.BROWSER) {
+    installProcessShutdownHandlers(() => topicMonitor?.stop());
+  }
+
   // Initialize MCP server
   const server = new Server(
     {
@@ -71,15 +96,22 @@ async function main() {
   });
 
   // Register tool execution handler
-  server.setRequestHandler(CallToolRequestSchema, async (request: CallToolRequest) => {
+  server.setRequestHandler(CallToolRequestSchema, async (request: CallToolRequest, extra) => {
     console.error(`Received CallToolRequest for tool: ${request.params.name}`);
-    
+    const callContext = createToolCallContext({
+      progressToken: request.params._meta?.progressToken,
+      sendProgressNotification: (parameters) =>
+        server.notification({ method: PROGRESS_NOTIFICATION_METHOD, params: parameters }),
+      cancellationSignal: extra.signal,
+      logger: authenticationLogger,
+    });
+
     try {
       if (!request.params.arguments) {
         throw new Error("No arguments provided");
       }
 
-      return await executeTool(client, request.params.name, request.params.arguments);
+      return await executeTool(client, request.params.name, request.params.arguments, callContext);
     } catch (error) {
       console.error("Error executing tool:", error);
       return {

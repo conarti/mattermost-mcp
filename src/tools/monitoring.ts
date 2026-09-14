@@ -2,6 +2,7 @@ import { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { MattermostClient } from "../client.js";
 import { TopicMonitor } from "../monitor/index.js";
 import { loadConfig } from "../config.js";
+import { AUTHENTICATION_MODES } from "../authentication/constants.js";
 
 // Global reference to the TopicMonitor instance
 let topicMonitorInstance: TopicMonitor | null = null;
@@ -25,6 +26,12 @@ export const runMonitoringTool: Tool = {
 // Handler for the run monitoring tool
 export async function handleRunMonitoring(client: MattermostClient, args: any) {
   try {
+    const browserMode = client.authenticationMode === AUTHENTICATION_MODES.BROWSER;
+    /* Монитор всегда фоновый, поэтому вход через окно возможен только здесь, в контексте вызова инструмента */
+    if (browserMode) {
+      await client.getMe();
+    }
+
     if (!topicMonitorInstance) {
       // If no instance is set, create a new one
       const config = loadConfig();
@@ -42,8 +49,14 @@ export async function handleRunMonitoring(client: MattermostClient, args: any) {
         };
       }
       
-      topicMonitorInstance = new TopicMonitor(client, config.monitoring);
-      await topicMonitorInstance.start();
+      const topicMonitor = new TopicMonitor(client, config.monitoring);
+      if (browserMode) {
+        await topicMonitor.start();
+        topicMonitorInstance = topicMonitor;
+      } else {
+        topicMonitorInstance = topicMonitor;
+        await topicMonitor.start();
+      }
     }
     
     // Run the monitoring process

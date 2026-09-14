@@ -1,8 +1,12 @@
 import { MattermostClient } from '../client.js';
 import { MonitoringConfig } from '../config.js';
+import { MattermostAuthenticationError, createStderrAuthenticationLogger } from '../authentication/runtime.js';
+import { BACKGROUND_CALL_CONTEXT } from '../authentication/session.js';
 import { Channel, Post, User, UserProfile } from '../types.js';
 import { findRelevantPosts, createNotificationMessage } from './analyzer.js';
 import { Scheduler } from './scheduler.js';
+
+const authenticationLogger = createStderrAuthenticationLogger();
 
 /**
  * TopicMonitor class for monitoring channels for topics of interest
@@ -22,7 +26,8 @@ export class TopicMonitor {
    * @param config Monitoring configuration
    */
   constructor(client: MattermostClient, config: MonitoringConfig) {
-    this.client = client;
+    /* Запуски по расписанию и runNow идут вне вызова инструмента и не должны открывать окно входа */
+    this.client = client.withCallContext(BACKGROUND_CALL_CONTEXT);
     this.config = config;
     this.scheduler = new Scheduler(config, this.monitorChannels.bind(this));
   }
@@ -106,6 +111,9 @@ export class TopicMonitor {
           console.error('Response format unexpected:', response);
         }
       } catch (innerError) {
+        if (innerError instanceof MattermostAuthenticationError) {
+          throw innerError;
+        }
         console.error('Error getting users:', innerError);
       }
       
@@ -150,6 +158,9 @@ export class TopicMonitor {
           }
         }
       } catch (innerError) {
+        if (innerError instanceof MattermostAuthenticationError) {
+          throw innerError;
+        }
         console.error('Error using fallback method:', innerError);
       }
       
@@ -283,6 +294,10 @@ export class TopicMonitor {
         await this.processChannel(channelName);
       }
     } catch (error) {
+      if (error instanceof MattermostAuthenticationError) {
+        authenticationLogger(`monitoring run skipped: ${error.code}`);
+        throw error;
+      }
       console.error('Error in monitorChannels:', error);
     }
   }

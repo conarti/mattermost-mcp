@@ -2,18 +2,33 @@ export const PERMISSION_BITS_MASK = 0o777;
 export const OUTPUT_LINE_SEPARATOR = '\n';
 export const FIXTURE_KILL_SIGNAL = 'SIGKILL';
 export const FIXTURE_TERMINATION_SIGNAL = 'SIGTERM';
+export const FIXTURE_HANGUP_SIGNAL = 'SIGHUP';
+export const FIXTURE_INTERRUPT_SIGNAL = 'SIGINT';
 export const FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS = 5_000;
 
 export const FIXTURE_FILE_NAMES = {
   LOCK_HOLDER: 'lockHolderProcess.js',
   EXIT_HANDLER: 'exitHandlerProcess.js',
   FAKE_PLAYWRIGHT_CLI: 'fakePlaywrightCli.js',
+  SIGNAL_DURING_LOGIN: 'signalDuringLoginProcess.js',
+  SIGNAL_DURING_INSTALLATION: 'signalDuringInstallationProcess.js',
 } as const;
 
 export const FIXTURE_OUTPUT_LINES = {
   READY: 'ready',
   ACQUIRED: 'acquired',
+  WAITING: 'waiting',
+  INSTALLING: 'installing',
 } as const;
+
+export const SIGNAL_DURING_LOGIN_FIXTURE_MODES = {
+  NORMAL: 'normal',
+  THROWING_SHUTDOWN: 'throwing-shutdown',
+} as const;
+
+export const FIXTURE_MATTERMOST_URL = 'http://127.0.0.1:9/api/v4';
+export const FIXTURE_TEAM_ID = 'team-test';
+export const FIXTURE_FILE_POLL_INTERVAL_MILLISECONDS = 20;
 
 export const LOCK_HOLDER_FIXTURE_MODES = {
   EXIT: 'exit',

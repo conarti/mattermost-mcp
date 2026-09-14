@@ -63,6 +63,7 @@ export const TEMPORARY_FILE_EXTENSION = '.tmp';
 export const PROCESS_EXIT_EVENT = 'exit';
 export const ABORT_EVENT = 'abort';
 export const SHUTDOWN_SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP'] as const;
+export const PROGRESS_NOTIFICATION_METHOD = 'notifications/progress';
 
 export const SERVER_PACKAGE_NAME = '@conarti/mattermost-mcp';
 export const PLAYWRIGHT_NPX_PACKAGE = `playwright@${PINNED_PLAYWRIGHT_VERSION}`;
