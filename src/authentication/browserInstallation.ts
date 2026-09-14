@@ -15,10 +15,15 @@ import {
   DATA_EVENT,
   END_EVENT,
   ERROR_EVENT,
+  ERROR_HEADER_LINE_PATTERN,
+  INSPECTED_ERROR_CODE_LINE_PATTERN,
+  INSPECTED_OBJECT_BRACKET_LINE_PATTERN,
+  INSPECTED_PROPERTY_LINE_PATTERN,
   INSTALLATION_ABORT_REASONS,
   INSTALLATION_FAILURE_MARKER,
   INSTALLATION_FAILURE_REASON_MAX_LENGTH,
   INSTALLATION_OUTPUT_LINE_LIMIT,
+  INSTALLATION_PENDING_OUTPUT_CHARACTER_LIMIT,
   INSTALLATION_PROGRESS_PATTERN,
   INSTALLATION_TEMPORARY_DIRECTORY_PREFIX,
   INSTALLER_KILL_SIGNAL,
@@ -33,11 +38,13 @@ import {
   PROCESS_EXIT_EVENT,
   REDACTED_URL_CREDENTIALS,
   SERVER_PACKAGE_NAME,
+  SPAWN_SYSTEM_CALL_PATTERN,
   STACK_TRACE_LINE_PATTERN,
   TEMPORARY_DIRECTORY_VARIABLE,
   TEXT_FILE_ENCODING,
   UNKNOWN_ERROR_CODE,
   URL_CREDENTIALS_PATTERN,
+  WHITESPACE_RUN_PATTERN,
 } from './constants.js';
 import { buildChromiumInstallCommand } from './browserLogin.js';
 import {
@@ -112,20 +119,50 @@ function cleanOutputLines(lines: readonly string[]): string {
     .filter((line) => !STACK_TRACE_LINE_PATTERN.test(line))
     .map((line) => line.replace(ASCII_BOX_CHARACTERS_PATTERN, ' '))
     .join(' ')
-    .replace(/\s+/g, ' ')
+    .replace(WHITESPACE_RUN_PATTERN, ' ')
     .trim();
+}
+
+function isDetailLine(line: string): boolean {
+  return (
+    line.trim().length > 0 &&
+    !STACK_TRACE_LINE_PATTERN.test(line) &&
+    !ASCII_BOX_LINE_PATTERN.test(line) &&
+    !INSPECTED_OBJECT_BRACKET_LINE_PATTERN.test(line) &&
+    !INSPECTED_PROPERTY_LINE_PATTERN.test(line)
+  );
+}
+
+/** Код из блока свойств util.inspect, который идёт за строкой заголовка ошибки до следующей ошибки */
+function findInspectedErrorCode(lines: readonly string[], errorHeaderIndex: number): string | undefined {
+  for (let index = errorHeaderIndex + 1; index < lines.length; index += 1) {
+    if (ERROR_HEADER_LINE_PATTERN.test(lines[index])) {
+      return undefined;
+    }
+    const match = INSPECTED_ERROR_CODE_LINE_PATTERN.exec(lines[index]);
+    if (match !== null) {
+      return match[1];
+    }
+  }
+  return undefined;
 }
 
 export function extractInstallationFailureReason(output: InstallationOutput): string {
   const failureMarkerIndex = findLastLineIndex(output.stdoutLines, (line) => line.includes(INSTALLATION_FAILURE_MARKER));
   const summary = failureMarkerIndex === -1 ? '' : cleanOutputLines(output.stdoutLines.slice(failureMarkerIndex + 1));
 
-  /* Подробную ошибку сети или распаковки внук установщика пишет в stderr; рамка WARNING про npx пропускается */
-  const detailIndex = findLastLineIndex(
-    output.stderrLines,
-    (line) => line.trim().length > 0 && !STACK_TRACE_LINE_PATTERN.test(line) && !ASCII_BOX_LINE_PATTERN.test(line),
-  );
-  const detail = detailIndex === -1 ? '' : cleanOutputLines([output.stderrLines[detailIndex]]);
+  /*
+   * Подробную ошибку сети или распаковки внук установщика пишет в stderr через console.error:
+   * после стека идёт блок свойств { errno, code, syscall }, поэтому заголовок ошибки важнее последней строки.
+   * Рамка WARNING про npx пропускается.
+   */
+  const errorHeaderIndex = findLastLineIndex(output.stderrLines, (line) => ERROR_HEADER_LINE_PATTERN.test(line));
+  const detailIndex = errorHeaderIndex === -1 ? findLastLineIndex(output.stderrLines, isDetailLine) : errorHeaderIndex;
+  let detail = detailIndex === -1 ? '' : cleanOutputLines([output.stderrLines[detailIndex]]);
+  const errorCode = errorHeaderIndex === -1 ? undefined : findInspectedErrorCode(output.stderrLines, errorHeaderIndex);
+  if (errorCode !== undefined && !detail.includes(errorCode)) {
+    detail = `${detail} (${errorCode})`;
+  }
 
   let reason: string;
   if (summary !== '' && detail !== '' && summary !== detail) {
@@ -185,7 +222,7 @@ export interface BrowserInstallerDependencies {
 type InstallationChildProcessEvent = typeof PROCESS_EXIT_EVENT | typeof CLOSE_EVENT;
 type InstallationChildProcessEndListener = (code: number | null, signal: NodeJS.Signals | null) => void;
 
-/** Явный адаптер: у ChildProcess поле pid необязательное, а интерфейс установщика требует его всегда */
+/** Явный адаптер: у ChildProcess поле pid объявлено необязательным, а интерфейс установщика требует поле со значением number | undefined */
 class SpawnedInstallationProcess implements InstallationChildProcess {
   constructor(private readonly child: ChildProcessByStdio<null, Readable, Readable>) {}
 
@@ -236,6 +273,10 @@ class OutputLineBuffer {
     this.pendingText += typeof chunk === 'string' ? chunk : chunk.toString(TEXT_FILE_ENCODING);
     const parts = this.pendingText.split('\n');
     this.pendingText = parts.pop() ?? '';
+    if (this.pendingText.length > INSTALLATION_PENDING_OUTPUT_CHARACTER_LIMIT) {
+      /* Для прогресса и причины ошибки важен конец строки */
+      this.pendingText = this.pendingText.slice(-INSTALLATION_PENDING_OUTPUT_CHARACTER_LIMIT);
+    }
     for (const part of parts) {
       this.addLine(part);
     }
@@ -265,6 +306,11 @@ function readLines(stream: NodeJS.ReadableStream, buffer: OutputLineBuffer): voi
   stream.on(END_EVENT, () => buffer.flush());
 }
 
+/** У ошибки запуска Node syscall равен spawn и имени файла, например spawn /usr/bin/node */
+function isSpawnError(error: Error): boolean {
+  return 'syscall' in error && typeof error.syscall === 'string' && SPAWN_SYSTEM_CALL_PATTERN.test(error.syscall);
+}
+
 function describeAbortReason(signal: AbortSignal): string {
   return typeof signal.reason === 'string' ? signal.reason : INSTALLATION_ABORT_REASONS.CANCELLED;
 }
@@ -285,6 +331,15 @@ export function createBrowserInstaller(dependencies: BrowserInstallerDependencie
 
   const createInstallationError = (description: string) =>
     new MattermostAuthenticationError(AUTHENTICATION_ERROR_CODES.BROWSER_INSTALLATION_FAILED, description);
+
+  /* Исключение в обработчике события потока или процесса промис не ловит, и оно завершило бы сервер */
+  const logFromEventHandler = (message: string): void => {
+    try {
+      logger(message);
+    } catch {
+      /* журнал недоступен, установка продолжается */
+    }
+  };
 
   return async (request) => {
     const { browsersDirectory, temporaryRootDirectory, cancellationSignal, onProgress } = request;
@@ -310,8 +365,15 @@ export function createBrowserInstaller(dependencies: BrowserInstallerDependencie
       const leftoverNames = (await readdir(temporaryRootDirectory)).filter((name) =>
         name.startsWith(INSTALLATION_TEMPORARY_DIRECTORY_PREFIX),
       );
+      /* Неудаляемый остаток не должен навсегда блокировать установку: новая папка всё равно уникальна */
       await Promise.all(
-        leftoverNames.map((name) => rm(join(temporaryRootDirectory, name), { recursive: true, force: true })),
+        leftoverNames.map(async (name) => {
+          try {
+            await rm(join(temporaryRootDirectory, name), { recursive: true, force: true });
+          } catch (error) {
+            logger(`installer leftover directory ${name} cleanup failed (${getErrorCode(error) ?? UNKNOWN_ERROR_CODE})`);
+          }
+        }),
       );
       temporaryDirectory = join(temporaryRootDirectory, `${INSTALLATION_TEMPORARY_DIRECTORY_PREFIX}${randomUUID()}`);
       await mkdir(temporaryDirectory, { mode: PRIVATE_DIRECTORY_MODE });
@@ -328,6 +390,9 @@ export function createBrowserInstaller(dependencies: BrowserInstallerDependencie
     const exitController = new AbortController();
     const closeController = new AbortController();
     const removeListeners: Array<() => void> = [];
+    /* Нужны, пока жив дочерний процесс: при истёкшем завершении снимаются по его событию exit */
+    const removeChildLifetimeListeners: Array<() => void> = [];
+    let installerOutcome: InstallerOutcome | undefined;
 
     try {
       if (cancellationSignal.aborted) {
@@ -347,13 +412,17 @@ export function createBrowserInstaller(dependencies: BrowserInstallerDependencie
           return;
         }
         lastProgress = progress;
-        onProgress(progress);
-        logger(`Chromium download ${progress.percent}% of ${progress.totalSizeDescription}`);
+        try {
+          onProgress(progress);
+        } catch (error) {
+          logFromEventHandler(`installation progress handler failed (${getErrorFirstLine(error)})`);
+        }
+        logFromEventHandler(`Chromium download ${progress.percent}% of ${progress.totalSizeDescription}`);
       };
       const stdoutBuffer = new OutputLineBuffer(handleStdoutLine);
       const stderrBuffer = new OutputLineBuffer(() => undefined);
 
-      const outcome = await new Promise<InstallerOutcome>((resolve) => {
+      installerOutcome = await new Promise<InstallerOutcome>((resolve) => {
         let finished = false;
         const finish = (result: InstallerOutcome): void => {
           if (!finished) {
@@ -392,7 +461,9 @@ export function createBrowserInstaller(dependencies: BrowserInstallerDependencie
         /* Синхронный и никогда не бросает: исключение отменило бы следующие обработчики exit, среди них Playwright */
         const terminateInstallerOnExit = (): void => killChild(INSTALLER_KILL_SIGNAL);
         processEvents.on(PROCESS_EXIT_EVENT, terminateInstallerOnExit);
-        removeListeners.push(() => processEvents.removeListener(PROCESS_EXIT_EVENT, terminateInstallerOnExit));
+        removeChildLifetimeListeners.push(() =>
+          processEvents.removeListener(PROCESS_EXIT_EVENT, terminateInstallerOnExit),
+        );
 
         readLines(child.stdout, stdoutBuffer);
         readLines(child.stderr, stderrBuffer);
@@ -428,21 +499,27 @@ export function createBrowserInstaller(dependencies: BrowserInstallerDependencie
 
         const handleError = (error: Error): void => {
           const errorCode = getErrorCode(error) ?? UNKNOWN_ERROR_CODE;
-          if (!firstErrorHandled && !exitReceived) {
+          /* Событием error приходит и ошибка kill у работающего процесса, запуск она не отменяет */
+          if (!firstErrorHandled && !exitReceived && isSpawnError(error)) {
             firstErrorHandled = true;
             finish({ kind: 'start-failed', errorCode });
             return;
           }
-          logger(`installer process error (${errorCode})`);
+          logFromEventHandler(`installer process error (${errorCode})`);
         };
         child.on(ERROR_EVENT, handleError);
-        removeListeners.push(() => child.removeListener(ERROR_EVENT, handleError));
+        removeChildLifetimeListeners.push(() => child.removeListener(ERROR_EVENT, handleError));
 
         let exitResult: { code: number | null; signal: NodeJS.Signals | null } | undefined;
         child.once(PROCESS_EXIT_EVENT, (code, signal) => {
           exitReceived = true;
           exitResult = { code, signal };
           exitController.abort();
+          if (installerOutcome?.kind === 'termination-expired') {
+            for (const removeListener of removeChildLifetimeListeners) {
+              removeListener();
+            }
+          }
           /* Поток может держать внук установщика, поэтому close ждётся не дольше паузы завершения */
           void clock
             .sleep(timings.installationTerminationGraceMilliseconds, closeController.signal)
@@ -454,16 +531,16 @@ export function createBrowserInstaller(dependencies: BrowserInstallerDependencie
         });
       });
 
-      if (outcome.kind === 'start-failed') {
-        throw createInstallationError(`could not start installer: ${outcome.errorCode}`);
+      if (installerOutcome.kind === 'start-failed') {
+        throw createInstallationError(`could not start installer: ${installerOutcome.errorCode}`);
       }
-      if (terminationReason !== undefined || outcome.kind === 'termination-expired') {
+      if (terminationReason !== undefined || installerOutcome.kind === 'termination-expired') {
         logger(`Chromium installation ${terminationReason}, installer terminated`);
         throw createInstallationError(
           `Chromium installation ${terminationReason}, installer terminated. Run manually: ${manualCommand}`,
         );
       }
-      if (outcome.code === 0 && outcome.signal === null) {
+      if (installerOutcome.code === 0 && installerOutcome.signal === null) {
         logger(`Chromium installation finished in ${toSeconds(clock.now() - startedAtMilliseconds)} s`);
         return;
       }
@@ -471,13 +548,20 @@ export function createBrowserInstaller(dependencies: BrowserInstallerDependencie
       const reason = extractInstallationFailureReason({
         stdoutLines: stdoutBuffer.lines,
         stderrLines: stderrBuffer.lines,
-        exitDescription: outcome.code !== null ? `exit code ${outcome.code}` : `signal ${outcome.signal}`,
+        exitDescription:
+          installerOutcome.code !== null ? `exit code ${installerOutcome.code}` : `signal ${installerOutcome.signal}`,
       });
       logger(`Chromium installation failed: ${reason}`);
       throw createInstallationError(`Chromium download failed: ${reason}. Run manually: ${manualCommand}`);
     } finally {
       for (const removeListener of removeListeners) {
         removeListener();
+      }
+      /* После истёкшего завершения процесс может быть жив: SIGKILL при выходе сервера ещё нужен */
+      if (installerOutcome?.kind !== 'termination-expired') {
+        for (const removeListener of removeChildLifetimeListeners) {
+          removeListener();
+        }
       }
       if (deadlineHandle !== undefined) {
         clock.clearInterval(deadlineHandle);

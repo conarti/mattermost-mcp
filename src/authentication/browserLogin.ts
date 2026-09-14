@@ -342,16 +342,20 @@ export function createBrowserLogin(dependencies: BrowserLoginDependencies): Perf
     };
 
     const findCandidate = (cookies: LoginBrowserCookie[]): string | undefined => {
-      const sessionCookie = cookies.find((cookie) => cookie.name === SESSION_COOKIE_NAME && cookie.value.length > 0);
-      if (sessionCookie === undefined) {
+      const sessionCookies = cookies.filter((cookie) => cookie.name === SESSION_COOKIE_NAME && cookie.value.length > 0);
+      if (sessionCookies.length === 0) {
         lastCheckDescription = SESSION_COOKIE_NOT_FOUND_DESCRIPTION;
         return undefined;
       }
-      if (sessionCookie.value === rejectedToken || rejectedCandidates.has(sessionCookie.value)) {
+      /* Cookie с этим именем может быть несколько, например для разных путей, и отвергнутая может идти первой */
+      const candidateCookie = sessionCookies.find(
+        (cookie) => cookie.value !== rejectedToken && !rejectedCandidates.has(cookie.value),
+      );
+      if (candidateCookie === undefined) {
         lastCheckDescription = SESSION_COOKIE_ALREADY_REJECTED_DESCRIPTION;
         return undefined;
       }
-      return sessionCookie.value;
+      return candidateCookie.value;
     };
 
     const isCandidateAccepted = async (candidate: string): Promise<boolean> => {
@@ -377,7 +381,26 @@ export function createBrowserLogin(dependencies: BrowserLoginDependencies): Perf
     };
 
     try {
-      const page = context.pages()[0] ?? (await context.newPage());
+      let page = context.pages()[0];
+      if (page === undefined) {
+        const newPageOutcome = await raceWithClock(
+          context.newPage(),
+          timings.loginPageNavigationTimeoutMilliseconds,
+          clock,
+        );
+        if (newPageOutcome.kind !== 'settled') {
+          const failureDescription =
+            newPageOutcome.kind === 'timed-out'
+              ? `did not open within ${toSeconds(timings.loginPageNavigationTimeoutMilliseconds)} s`
+              : `could not be opened (${getErrorFirstLine(newPageOutcome.error)})`;
+          logger(`sign-in page ${failureDescription}`);
+          throw new MattermostAuthenticationError(
+            AUTHENTICATION_ERROR_CODES.LOGIN_WINDOW_CLOSED,
+            `The Mattermost sign-in page ${failureDescription}. Retry the tool call to open it again.`,
+          );
+        }
+        page = newPageOutcome.value;
+      }
       /* Вход определяется по cookie, поэтому ошибка и истечение навигации не прерывают ожидание */
       await raceWithClock(
         page.goto(buildLoginPageUrl(siteUrl), {

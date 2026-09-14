@@ -1,6 +1,7 @@
 import { createBrowserInstaller } from '../../src/authentication/browserInstallation.js';
 import { DEFAULT_AUTHENTICATION_TIMINGS } from '../../src/authentication/constants.js';
 import { createStderrAuthenticationLogger } from '../../src/authentication/runtime.js';
+import { PLAYWRIGHT_CLI_FIXTURE_VARIABLES } from './fixtureConstants.js';
 
 const [browsersDirectory, temporaryRootDirectory, fakeCliPath, mode] = process.argv.slice(2);
 
@@ -8,7 +9,7 @@ const installBrowser = createBrowserInstaller({
   timings: DEFAULT_AUTHENTICATION_TIMINGS,
   logger: createStderrAuthenticationLogger(),
   resolveCliPath: () => fakeCliPath,
-  environment: { ...process.env, FAKE_PLAYWRIGHT_CLI_MODE: mode },
+  environment: { ...process.env, [PLAYWRIGHT_CLI_FIXTURE_VARIABLES.MODE]: mode },
 });
 
 try {

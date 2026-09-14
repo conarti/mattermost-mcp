@@ -1,21 +1,26 @@
 import assert from 'node:assert/strict';
+import { getEventListeners } from 'node:events';
 import { existsSync, statSync } from 'node:fs';
-import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
+import { inspect } from 'node:util';
 import {
   BrowserInstallationProgress,
   BrowserInstallerDependencies,
   buildInstallationEnvironment,
   createBrowserInstaller,
   parseInstallationProgressLine,
+  redactUrlCredentials,
   resolvePlaywrightCliPath,
 } from '../../src/authentication/browserInstallation.js';
 import { buildChromiumInstallCommand } from '../../src/authentication/browserLogin.js';
 import {
+  AUTHENTICATION_ERROR_CODES,
   DEFAULT_AUTHENTICATION_TIMINGS,
   INSTALLATION_ABORT_REASONS,
+  INSTALLATION_PENDING_OUTPUT_CHARACTER_LIMIT,
   PRIVATE_DIRECTORY_MODE,
 } from '../../src/authentication/constants.js';
 import { MattermostAuthenticationError } from '../../src/authentication/runtime.js';
@@ -26,12 +31,13 @@ import {
   FakeInstallationSpawner,
   FakeProcessEvents,
 } from '../fixtures/fakeInstallationProcess.js';
+import { FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS, PERMISSION_BITS_MASK } from '../fixtures/fixtureConstants.js';
 
 const START_MILLISECONDS = 1_000_000_000_000;
 const BROWSERS_DIRECTORY = '/fake/state/browsers';
 const FAKE_CLI_PATH = '/fake/node_modules/playwright-core/cli.js';
 const FAKE_NODE_EXECUTABLE_PATH = '/fake/bin/node';
-const PERMISSION_BITS_MASK = 0o777;
+const LOCKED_DIRECTORY_MODE = 0o500;
 const PROGRESS_BAR_WIDTH = 80;
 const MANUAL_COMMAND = buildChromiumInstallCommand(BROWSERS_DIRECTORY);
 
@@ -100,6 +106,10 @@ async function createInstallerTestContext(
     processOptions?: FakeInstallationProcessOptions;
     onLaunch?: (launch: FakeInstallationLaunch) => void;
     temporaryRootDirectory?: string;
+    /** Вызывается после записи события прогресса и может бросить исключение */
+    onProgress?: (progress: BrowserInstallationProgress) => void;
+    /** Журнал записывает сообщение и бросает исключение, если условие выполнено */
+    loggerThrowsFor?: (message: string) => boolean;
   } = {},
 ): Promise<InstallerTestContext> {
   const temporaryRootDirectory =
@@ -113,7 +123,12 @@ async function createInstallerTestContext(
   const abortController = new AbortController();
   const dependencies: BrowserInstallerDependencies = {
     timings: DEFAULT_AUTHENTICATION_TIMINGS,
-    logger: (message) => messages.push(message),
+    logger: (message) => {
+      messages.push(message);
+      if (options.loggerThrowsFor?.(message)) {
+        throw new Error('logger failed');
+      }
+    },
     clock,
     spawnProcess: spawner.spawn,
     resolveCliPath: () => FAKE_CLI_PATH,
@@ -128,7 +143,10 @@ async function createInstallerTestContext(
         browsersDirectory: BROWSERS_DIRECTORY,
         temporaryRootDirectory,
         cancellationSignal: abortController.signal,
-        onProgress: (progress) => progressEvents.push(progress),
+        onProgress: (progress) => {
+          progressEvents.push(progress);
+          options.onProgress?.(progress);
+        },
       }),
     );
   return { temporaryRootDirectory, clock, messages, progressEvents, spawner, processEvents, abortController, start };
@@ -147,6 +165,34 @@ async function captureInstallationError(promise: Promise<void>): Promise<Matterm
     return error;
   }
   throw new Error('installation was expected to fail');
+}
+
+/** Системная ошибка Node с одной строкой стека и свойствами, как у ошибок сети */
+function createSystemError(message: string, stackFrame: string, properties: Record<string, string | number>): Error {
+  const error = Object.assign(new Error(message), properties);
+  error.stack = `Error: ${message}\n    at ${stackFrame}`;
+  return error;
+}
+
+/** Так ошибку печатает console.error во внуке установщика */
+function inspectErrorAsConsole(error: Error): string {
+  return `${inspect(error)}\n`;
+}
+
+function assertWithoutInspectedProperties(message: string): void {
+  const description = message.slice(`[${AUTHENTICATION_ERROR_CODES.BROWSER_INSTALLATION_FAILED}]`.length);
+  for (const fragment of ['{', '}', '[', ']', 'errno', 'syscall', 'hostname']) {
+    assert.equal(description.includes(fragment), false, `${fragment} in ${message}`);
+  }
+}
+
+async function runFailedInstallation(stderrText: string): Promise<MattermostAuthenticationError> {
+  const context = await createInstallerTestContext();
+  const installation = context.start();
+  const { child } = await context.spawner.waitForLaunch();
+  child.writeStderr(stderrText);
+  child.emitExit(1, null);
+  return captureInstallationError(installation.promise);
 }
 
 test('R1: progress lines are parsed and other output is ignored', () => {
@@ -206,7 +252,7 @@ test('R3: the installer environment keeps proxy variables and overrides the brow
   assert.deepEqual(environment, originalEnvironment);
 });
 
-test('R4: the installer is started once with the pinned arguments, pipes and a fresh private TMPDIR', async () => {
+test('R4: the installer is started once with the pinned arguments, pipes and a fresh private TMPDIR', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
   const temporaryRootDirectory = await mkdtemp(join(tmpdir(), 'mattermost-mcp-installer-'));
   const leftoverDirectory = join(temporaryRootDirectory, 'installation-old');
   await mkdir(leftoverDirectory);
@@ -238,7 +284,7 @@ test('R4: the installer is started once with the pinned arguments, pipes and a f
   assert.deepEqual(observedAtLaunch, { temporaryDirectoryMode: PRIVATE_DIRECTORY_MODE, leftoverExists: false });
 });
 
-test('R5: progress is reported from chunked output and success waits for the close event', async () => {
+test('R5: progress is reported from chunked output and success waits for the close event', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
   const context = await createInstallerTestContext();
   const installation = context.start();
   const { child } = await context.spawner.waitForLaunch();
@@ -278,12 +324,21 @@ test('R5: progress is reported from chunked output and success waits for the clo
   assert.ok(withoutClose.messages.includes('Chromium installation finished in 5 s'));
 });
 
-test('R6: a failed download reports the summary from stdout and the detail from stderr without stack lines', async () => {
+test('R6: a failed download reports the summary from stdout and the detail from stderr without stack lines', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
   const context = await createInstallerTestContext();
   const installation = context.start();
   const { child } = await context.spawner.waitForLaunch();
 
-  child.writeStderr('Error: getaddrinfo ENOTFOUND cdn.playwright.dev\n    at GetAddrInfoReqWrap.onlookupall (node:dns:120:26)\n');
+  child.writeStderr(
+    inspectErrorAsConsole(
+      createSystemError('getaddrinfo ENOTFOUND cdn.playwright.dev', 'GetAddrInfoReqWrap.onlookupall [as oncomplete] (node:dns:120:26)', {
+        errno: -3008,
+        code: 'ENOTFOUND',
+        syscall: 'getaddrinfo',
+        hostname: 'cdn.playwright.dev',
+      }),
+    ),
+  );
   child.writeStdout(
     [
       'Failed to install browsers',
@@ -298,17 +353,57 @@ test('R6: a failed download reports the summary from stdout and the detail from 
   const error = await captureInstallationError(installation.promise);
 
   assert.ok(error.message.includes('Failed to download Chrome for Testing'));
-  assert.ok(error.message.includes('Download failure, code=1'));
-  assert.ok(error.message.includes('getaddrinfo ENOTFOUND cdn.playwright.dev'));
+  assert.ok(
+    error.message.includes(
+      'Download failure, code=1; Error: getaddrinfo ENOTFOUND cdn.playwright.dev. Run manually:',
+    ),
+    error.message,
+  );
   assert.ok(
     error.message.includes(`PLAYWRIGHT_BROWSERS_PATH='${BROWSERS_DIRECTORY}' npx playwright@1.63.0 install chromium --no-shell`),
   );
   assert.equal(error.message.includes(' at '), false);
   assert.equal(error.message.includes('coreBundle.js'), false);
   assert.equal(error.message.includes('node:dns'), false);
+  assertWithoutInspectedProperties(error.message);
+
+  const connectionReset = await runFailedInstallation(
+    inspectErrorAsConsole(
+      createSystemError(
+        'Client network socket disconnected before secure TLS connection was established',
+        'TLSSocket.onConnectEnd (node:_tls_wrap:1727:19)',
+        { code: 'ECONNRESET', host: 'cdn.playwright.dev', port: 443 },
+      ),
+    ),
+  );
+  assert.ok(
+    connectionReset.message.includes(
+      'Chromium download failed: Error: Client network socket disconnected before secure TLS connection was established (ECONNRESET). Run manually:',
+    ),
+    connectionReset.message,
+  );
+  assertWithoutInspectedProperties(connectionReset.message);
+
+  const refusedErrors = ['::1', '127.0.0.1'].map((address) =>
+    createSystemError(`connect ECONNREFUSED ${address}:3128`, 'TCPConnectWrap.afterConnect [as oncomplete] (node:net:1637:16)', {
+      errno: -61,
+      code: 'ECONNREFUSED',
+      syscall: 'connect',
+      address,
+      port: 3128,
+    }),
+  );
+  const aggregateError = Object.assign(new AggregateError(refusedErrors), { code: 'ECONNREFUSED' });
+  aggregateError.stack = 'AggregateError\n    at internalConnectMultiple (node:net:1139:18)';
+  const connectionRefused = await runFailedInstallation(inspectErrorAsConsole(aggregateError));
+  assert.ok(
+    connectionRefused.message.includes('Chromium download failed: Error: connect ECONNREFUSED 127.0.0.1:3128. Run manually:'),
+    connectionRefused.message,
+  );
+  assertWithoutInspectedProperties(connectionRefused.message);
 });
 
-test('R7: the lockfile box from the installer is kept as text without box characters', async () => {
+test('R7: the lockfile box from the installer is kept as text without box characters', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
   const context = await createInstallerTestContext();
   const installation = context.start();
   const { child } = await context.spawner.waitForLaunch();
@@ -342,7 +437,7 @@ test('R7: the lockfile box from the installer is kept as text without box charac
   assert.equal(/[║╔╗╚╝═]/.test(error.message), false);
 });
 
-test('R8: the npx warning box is ignored and the exit description is used without output', async () => {
+test('R8: the npx warning box is ignored and the exit description is used without output', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
   const withWarning = await createInstallerTestContext();
   const warningInstallation = withWarning.start();
   const warningLaunch = await withWarning.spawner.waitForLaunch();
@@ -369,7 +464,7 @@ test('R8: the npx warning box is ignored and the exit description is used withou
   assert.deepEqual(killedLaunch.child.killSignals, []);
 });
 
-test('R9: proxy credentials are redacted in the error text and in the log', async () => {
+test('R9: proxy credentials are redacted in the error text and in the log', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
   const context = await createInstallerTestContext();
   const installation = context.start();
   const { child } = await context.spawner.waitForLaunch();
@@ -384,9 +479,17 @@ test('R9: proxy credentials are redacted in the error text and in the log', asyn
   const failureLog = context.messages.find((message) => message.startsWith('Chromium installation failed:'));
   assert.ok(failureLog?.includes('https://***@proxy.test:3128'));
   assert.equal(context.messages.some((message) => message.includes('secret-password')), false);
+
+  assert.equal(redactUrlCredentials('via http://user:p@ss@proxy.test:3128/path'), 'via http://***@proxy.test:3128/path');
+  assert.equal(redactUrlCredentials('via http://:secret@proxy.test:3128'), 'via http://***@proxy.test:3128');
+  assert.equal(redactUrlCredentials('via http://token@proxy.test'), 'via http://***@proxy.test');
+  assert.equal(
+    redactUrlCredentials('from https://cdn.playwright.dev/builds/@scope/chrome.zip?user=a@b'),
+    'from https://cdn.playwright.dev/builds/@scope/chrome.zip?user=a@b',
+  );
 });
 
-test('R10: the installer is terminated after 600 s with SIGTERM and then SIGKILL', async () => {
+test('R10: the installer is terminated after 600 s with SIGTERM and then SIGKILL', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
   const exitsOnSignal = await createInstallerTestContext();
   const exitsInstallation = exitsOnSignal.start();
   const exitsLaunch = await exitsOnSignal.spawner.waitForLaunch();
@@ -430,7 +533,7 @@ test('R10: the installer is terminated after 600 s with SIGTERM and then SIGKILL
   assert.deepEqual(terminatedLaunch.child.killSignals, ['SIGTERM']);
 });
 
-test('R11: cancellation terminates the installer with the abort reason', async () => {
+test('R11: cancellation terminates the installer with the abort reason', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
   const cancelled = await createInstallerTestContext({ processOptions: { ignoreSignals: true } });
   const cancelledInstallation = cancelled.start();
   const cancelledLaunch = await cancelled.spawner.waitForLaunch();
@@ -462,11 +565,14 @@ test('R11: cancellation terminates the installer with the abort reason', async (
   assert.equal(cancelledBeforeStart.spawner.launches.length, 0);
 });
 
-test('R12: a spawn error fails the installation and later errors are only logged', async () => {
+test('R12: a spawn error fails the installation and later errors are only logged', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
   const context = await createInstallerTestContext();
   const installation = context.start();
   const { child } = await context.spawner.waitForLaunch();
-  const spawnError = Object.assign(new Error(`spawn ${FAKE_NODE_EXECUTABLE_PATH} ENOENT`), { code: 'ENOENT' });
+  const spawnError = Object.assign(new Error(`spawn ${FAKE_NODE_EXECUTABLE_PATH} ENOENT`), {
+    code: 'ENOENT',
+    syscall: `spawn ${FAKE_NODE_EXECUTABLE_PATH}`,
+  });
 
   child.emitError(spawnError);
   assert.doesNotThrow(() => child.emitError(spawnError));
@@ -480,7 +586,7 @@ test('R12: a spawn error fails the installation and later errors are only logged
   assert.deepEqual(child.killSignals, []);
 });
 
-test('R13: the process exit handler kills the running installer and never throws', async () => {
+test('R13: the process exit handler kills the running installer and never throws', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
   const context = await createInstallerTestContext({ processOptions: { ignoreSignals: true } });
   const installation = context.start();
   const { child } = await context.spawner.waitForLaunch();
@@ -497,7 +603,7 @@ test('R13: the process exit handler kills the running installer and never throws
   assert.equal(context.processEvents.listenersOf('exit').length, 0);
 });
 
-test('R14: large output keeps only recent lines and the reason is limited to 500 characters', async () => {
+test('R14: large output keeps only recent lines and the reason is limited to 500 characters', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
   const context = await createInstallerTestContext();
   const installation = context.start();
   const { child } = await context.spawner.waitForLaunch();
@@ -522,4 +628,154 @@ test('R14: large output keeps only recent lines and the reason is limited to 500
   const longError = await captureInstallationError(longInstallation.promise);
   const serviceTextLength = '[BROWSER_INSTALLATION_FAILED] Chromium download failed: . Run manually: '.length + MANUAL_COMMAND.length;
   assert.equal(longError.message.length, serviceTextLength + 500);
+});
+
+test('R15: an error event of a running installer is only logged unless it comes from spawn', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
+  const context = await createInstallerTestContext();
+  const installation = context.start();
+  const { child } = await context.spawner.waitForLaunch();
+
+  child.emitError(Object.assign(new Error('kill EPERM'), { code: 'EPERM', errno: -1, syscall: 'kill' }));
+  child.emitError(new Error('unexpected installer error'));
+  await flushAsyncWork();
+  assert.equal(installation.settled, false);
+  assert.ok(context.messages.includes('installer process error (EPERM)'));
+  assert.ok(context.messages.includes('installer process error (UNKNOWN)'));
+
+  child.emitExit(0, null);
+  await installation.promise;
+  assert.ok(context.messages.includes('Chromium installation finished in 0 s'));
+  assert.equal(child.listenerCount('error'), 0);
+});
+
+test('R16: after termination expires the exit handler stays until the installer process exits', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
+  const context = await createInstallerTestContext({ processOptions: { ignoreSignals: true } });
+  const installation = context.start();
+  const { child } = await context.spawner.waitForLaunch();
+
+  context.clock.advance(600_000);
+  await context.clock.waitForPendingSleeps(1);
+  context.clock.advance(5_000);
+  await flushAsyncWork();
+  await context.clock.waitForPendingSleeps(1);
+  context.clock.advance(5_000);
+  const error = await captureInstallationError(installation.promise);
+  assert.ok(error.message.includes('timed out after 600 s, installer terminated'));
+  assert.deepEqual(child.killSignals, ['SIGTERM', 'SIGKILL']);
+
+  const exitListeners = context.processEvents.listenersOf('exit');
+  assert.equal(exitListeners.length, 1);
+  assert.equal(child.listenerCount('error'), 1);
+  exitListeners[0]();
+  assert.deepEqual(child.killSignals, ['SIGTERM', 'SIGKILL', 'SIGKILL']);
+
+  child.emitExit(null, 'SIGKILL');
+  await flushAsyncWork();
+  await flushAsyncWork();
+  assert.equal(context.processEvents.listenersOf('exit').length, 0);
+  assert.equal(child.listenerCount('error'), 0);
+  assert.deepEqual(await installationDirectoriesIn(context.temporaryRootDirectory), []);
+});
+
+test('R17: exceptions from the progress callback and the logger in output handlers do not break the installation', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
+  const throwingMessagePrefixes = ['Chromium download', 'installation progress handler failed', 'installer process error'];
+  const context = await createInstallerTestContext({
+    onProgress: () => {
+      throw new Error('progress consumer failed');
+    },
+    loggerThrowsFor: (message) => throwingMessagePrefixes.some((prefix) => message.startsWith(prefix)),
+  });
+  const installation = context.start();
+  const { child } = await context.spawner.waitForLaunch();
+
+  child.writeStdout(`${buildProgressLine(10)}\n${buildProgressLine(40)}\n`);
+  await flushAsyncWork();
+  assert.doesNotThrow(() => child.emitError(new Error('unexpected installer error')));
+  child.writeStdout(buildProgressLine(100));
+  child.emitExit(0, null);
+  await installation.promise;
+
+  assert.deepEqual(
+    context.progressEvents.map((progress) => progress.percent),
+    [10, 40, 100],
+  );
+  assert.equal(
+    context.messages.filter((message) => message === 'installation progress handler failed (progress consumer failed)').length,
+    3,
+  );
+  assert.ok(context.messages.includes('Chromium download 100% of 150.3 MiB'));
+  assert.ok(context.messages.includes('installer process error (UNKNOWN)'));
+  assert.ok(context.messages.includes('Chromium installation finished in 0 s'));
+});
+
+test('R18: a leftover installation directory that cannot be removed is logged and does not block the installation', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
+  const temporaryRootDirectory = await mkdtemp(join(tmpdir(), 'mattermost-mcp-installer-'));
+  const leftoverName = 'installation-stuck';
+  const lockedDirectory = join(temporaryRootDirectory, leftoverName, 'locked');
+  await mkdir(lockedDirectory, { recursive: true });
+  await writeFile(join(lockedDirectory, 'partial.zip'), 'partial archive');
+  await chmod(lockedDirectory, LOCKED_DIRECTORY_MODE);
+
+  try {
+    const context = await createInstallerTestContext({ temporaryRootDirectory });
+    const installation = context.start();
+    const launch = await context.spawner.waitForLaunch();
+    launch.child.emitExit(0, null);
+    await installation.promise;
+
+    const installerTemporaryDirectory = launch.options.env.TMPDIR ?? '';
+    assert.ok(installerTemporaryDirectory.startsWith(join(temporaryRootDirectory, 'installation-')));
+    assert.notEqual(installerTemporaryDirectory, join(temporaryRootDirectory, leftoverName));
+    assert.ok(context.messages.includes('Chromium installation finished in 0 s'));
+    /* Под root права папки не мешают удалению, тогда остатка и записи в журнале нет */
+    const removalDenied = process.getuid?.() !== 0;
+    assert.equal(existsSync(lockedDirectory), removalDenied);
+    assert.equal(
+      context.messages.some((message) => message.startsWith(`installer leftover directory ${leftoverName} cleanup failed (`)),
+      removalDenied,
+    );
+    assert.equal(existsSync(installerTemporaryDirectory), false);
+  } finally {
+    await chmod(lockedDirectory, PRIVATE_DIRECTORY_MODE);
+  }
+});
+
+test('R19: an output line without a line break keeps only its last characters within the limit', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
+  const headMarker = 'HEAD';
+  const runWithUnterminatedStderr = async (tailLength: number): Promise<MattermostAuthenticationError> => {
+    const context = await createInstallerTestContext();
+    const installation = context.start();
+    const { child } = await context.spawner.waitForLaunch();
+    child.writeStderr(headMarker);
+    await flushAsyncWork();
+    child.writeStderr('x'.repeat(tailLength));
+    await flushAsyncWork();
+    child.emitExit(1, null);
+    return captureInstallationError(installation.promise);
+  };
+
+  const withinLimit = await runWithUnterminatedStderr(INSTALLATION_PENDING_OUTPUT_CHARACTER_LIMIT - headMarker.length);
+  assert.ok(withinLimit.message.includes(`Chromium download failed: ${headMarker}xxx`), withinLimit.message.slice(0, 100));
+
+  const overLimit = await runWithUnterminatedStderr(INSTALLATION_PENDING_OUTPUT_CHARACTER_LIMIT - headMarker.length + 1);
+  assert.ok(overLimit.message.includes(`Chromium download failed: ${headMarker.slice(1)}xxx`), overLimit.message.slice(0, 100));
+  assert.equal(overLimit.message.includes(headMarker), false);
+});
+
+test('R20: cancellation while the temporary directory is prepared stops before start and the abort listener is removed', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
+  const cancelledDuringPreparation = await createInstallerTestContext();
+  const cancelledInstallation = cancelledDuringPreparation.start();
+  cancelledDuringPreparation.abortController.abort(INSTALLATION_ABORT_REASONS.CANCELLED);
+  const cancelledError = await captureInstallationError(cancelledInstallation.promise);
+  assert.ok(cancelledError.message.includes('Chromium installation cancelled before start'));
+  assert.equal(cancelledDuringPreparation.spawner.launches.length, 0);
+  assert.deepEqual(await installationDirectoriesIn(cancelledDuringPreparation.temporaryRootDirectory), []);
+
+  const completed = await createInstallerTestContext();
+  const completedInstallation = completed.start();
+  const { child } = await completed.spawner.waitForLaunch();
+  assert.equal(getEventListeners(completed.abortController.signal, 'abort').length, 1);
+  child.emitExit(0, null);
+  await completedInstallation.promise;
+  assert.equal(getEventListeners(completed.abortController.signal, 'abort').length, 0);
 });

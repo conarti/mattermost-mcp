@@ -5,6 +5,7 @@ import type {
   LoginBrowserLauncher,
   LoginBrowserPage,
 } from '../../src/authentication/browserLogin.js';
+import { CLOSE_EVENT, LOGIN_PAGE_WAIT_CONDITION } from '../../src/authentication/constants.js';
 
 /** Шаг сценария cookie: список cookie или чтение, которое никогда не завершается */
 export type FakeCookieStep = LoginBrowserCookie[] | 'never-resolves';
@@ -14,6 +15,11 @@ export interface FakeLoginBrowserContextOptions {
   cookieSteps?: FakeCookieStep[];
   gotoNeverResolves?: boolean;
   closeNeverResolves?: boolean;
+  /** Контекст открывается без окна, страницу создаёт newPage */
+  withoutInitialPage?: boolean;
+  newPageNeverResolves?: boolean;
+  /** newPage отклоняется этой ошибкой */
+  newPageError?: Error;
   /** Часы для журнала времени чтений cookie */
   now?: () => number;
 }
@@ -23,11 +29,11 @@ function neverResolves<T>(): Promise<T> {
 }
 
 export class FakeLoginBrowserPage implements LoginBrowserPage {
-  readonly gotoCalls: Array<{ url: string; options: { waitUntil: 'domcontentloaded'; timeout: number } }> = [];
+  readonly gotoCalls: Array<{ url: string; options: { waitUntil: typeof LOGIN_PAGE_WAIT_CONDITION; timeout: number } }> = [];
 
   constructor(private readonly gotoNeverResolves: boolean) {}
 
-  goto(url: string, options: { waitUntil: 'domcontentloaded'; timeout: number }): Promise<unknown> {
+  goto(url: string, options: { waitUntil: typeof LOGIN_PAGE_WAIT_CONDITION; timeout: number }): Promise<unknown> {
     this.gotoCalls.push({ url, options });
     return this.gotoNeverResolves ? neverResolves() : Promise.resolve(null);
   }
@@ -45,7 +51,7 @@ export class FakeLoginBrowserContext implements LoginBrowserContext {
 
   constructor(private readonly options: FakeLoginBrowserContextOptions = {}) {
     this.cookieSteps = [...(options.cookieSteps ?? [[]])];
-    this.openPages = [new FakeLoginBrowserPage(options.gotoNeverResolves ?? false)];
+    this.openPages = options.withoutInitialPage ? [] : [new FakeLoginBrowserPage(options.gotoNeverResolves ?? false)];
   }
 
   get cookieReadCount(): number {
@@ -62,6 +68,12 @@ export class FakeLoginBrowserContext implements LoginBrowserContext {
 
   async newPage(): Promise<LoginBrowserPage> {
     this.newPageCalls += 1;
+    if (this.options.newPageNeverResolves) {
+      return neverResolves();
+    }
+    if (this.options.newPageError !== undefined) {
+      throw this.options.newPageError;
+    }
     const page = new FakeLoginBrowserPage(this.options.gotoNeverResolves ?? false);
     this.openPages.push(page);
     return page;
@@ -75,8 +87,8 @@ export class FakeLoginBrowserContext implements LoginBrowserContext {
     return step === 'never-resolves' ? neverResolves() : Promise.resolve(step.map((cookie) => ({ ...cookie })));
   }
 
-  on(event: 'close', listener: () => void): unknown {
-    if (event === 'close') {
+  on(event: typeof CLOSE_EVENT, listener: () => void): unknown {
+    if (event === CLOSE_EVENT) {
       this.closeListeners.push(listener);
     }
     return this;

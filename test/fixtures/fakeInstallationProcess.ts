@@ -5,6 +5,7 @@ import type {
   InstallationSpawnOptions,
   SpawnInstallationProcess,
 } from '../../src/authentication/browserInstallation.js';
+import { CLOSE_EVENT, ERROR_EVENT, PROCESS_EXIT_EVENT } from '../../src/authentication/constants.js';
 
 export interface FakeInstallationProcessOptions {
   /** Сигналы только записываются в журнал, процесс сам не завершается */
@@ -61,19 +62,19 @@ export class FakeInstallationChildProcess extends EventEmitter implements Instal
     this.stdout.end();
     this.stderr.end();
     setImmediate(() => {
-      this.emit('exit', code, signal);
+      this.emit(PROCESS_EXIT_EVENT, code, signal);
       if (!options.withoutClose) {
-        setImmediate(() => this.emit('close', code, signal));
+        setImmediate(() => this.emit(CLOSE_EVENT, code, signal));
       }
     });
   }
 
   emitClose(code: number | null, signal: NodeJS.Signals | null): void {
-    this.emit('close', code, signal);
+    this.emit(CLOSE_EVENT, code, signal);
   }
 
   emitError(error: Error): void {
-    this.emit('error', error);
+    this.emit(ERROR_EVENT, error);
   }
 }
 

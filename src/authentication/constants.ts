@@ -78,11 +78,19 @@ export const END_EVENT = 'end';
 export const INSTALLER_TERMINATION_SIGNAL = 'SIGTERM';
 export const INSTALLER_KILL_SIGNAL = 'SIGKILL';
 export const INSTALLATION_OUTPUT_LINE_LIMIT = 50;
+/** Незавершённая строка вывода установщика: 64 КБ, лишнее отбрасывается с начала */
+export const INSTALLATION_PENDING_OUTPUT_CHARACTER_LIMIT = 64 * 1024;
 export const INSTALLATION_FAILURE_REASON_MAX_LENGTH = 500;
 export const STACK_TRACE_LINE_PATTERN = /^\s+at /;
 export const ASCII_BOX_LINE_PATTERN = /^\s*[╔║╚]/;
 export const ASCII_BOX_CHARACTERS_PATTERN = /[╔╗╚╝║═]/g;
-export const URL_CREDENTIALS_PATTERN = /\/\/[^\s/@:]+:[^\s/@]*@/g;
+export const WHITESPACE_RUN_PATTERN = /\s+/g;
+export const INSPECTED_OBJECT_BRACKET_LINE_PATTERN = /^\s*[{}\[\]],?\s*$/;
+export const INSPECTED_PROPERTY_LINE_PATTERN = /^\s+[\w$]+: /;
+export const ERROR_HEADER_LINE_PATTERN = /^\s*(?:[A-Z]\w*)?Error\b/;
+export const INSPECTED_ERROR_CODE_LINE_PATTERN = /^\s+code: '([^'\s]+)',?\s*$/;
+export const SPAWN_SYSTEM_CALL_PATTERN = /^spawn(?:\s|$)/;
+export const URL_CREDENTIALS_PATTERN = /\/\/[^\s/?#]*@/g;
 export const REDACTED_URL_CREDENTIALS = '//***@';
 
 export interface AuthenticationTimings {

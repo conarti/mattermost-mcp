@@ -22,6 +22,7 @@ import { MattermostAuthenticationError } from '../../src/authentication/runtime.
 import { StatePaths, resolveStatePaths } from '../../src/authentication/stateFiles.js';
 import { FakeClock } from '../fixtures/fakeClock.js';
 import { FakeCookieStep, FakeLoginBrowserContext, FakeLoginBrowserLauncher } from '../fixtures/fakeLoginBrowser.js';
+import { FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS, PERMISSION_BITS_MASK } from '../fixtures/fixtureConstants.js';
 
 const START_MILLISECONDS = 1_000_000_000_000;
 const SITE_URL = 'https://chat.example.test';
@@ -31,7 +32,6 @@ const FRESH_TOKEN = 'fresh-token-value-2';
 const OTHER_TOKEN = 'other-token-value-3';
 const CLOCK_STEP_MILLISECONDS = 1_000;
 const MAXIMUM_CLOCK_STEPS = 2_000;
-const PERMISSION_BITS_MASK = 0o777;
 
 const allLoggedMessages: string[] = [];
 const temporaryDirectories: string[] = [];
@@ -101,6 +101,9 @@ function createLoginTestContext(options: {
   cookieSteps?: FakeCookieStep[];
   gotoNeverResolves?: boolean;
   closeNeverResolves?: boolean;
+  withoutInitialPage?: boolean;
+  newPageNeverResolves?: boolean;
+  newPageError?: Error;
   validate?: (token: string, callIndex: number) => ValidationStep;
 }): LoginTestContext {
   const clock = new FakeClock(START_MILLISECONDS);
@@ -109,6 +112,9 @@ function createLoginTestContext(options: {
     cookieSteps: options.cookieSteps,
     gotoNeverResolves: options.gotoNeverResolves,
     closeNeverResolves: options.closeNeverResolves,
+    withoutInitialPage: options.withoutInitialPage,
+    newPageNeverResolves: options.newPageNeverResolves,
+    newPageError: options.newPageError,
     now: () => clock.now(),
   });
   const launcher = new FakeLoginBrowserLauncher(context);
@@ -148,7 +154,7 @@ function isAuthenticationError(code: string): (error: unknown) => boolean {
   return (error) => error instanceof MattermostAuthenticationError && error.code === code;
 }
 
-test('B1: site url is derived from the API url and used for the login page and cookie reads', async () => {
+test('B1: site url is derived from the API url and used for the login page and cookie reads', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
   assert.equal(deriveSiteUrl('https://Chat.Example.test/api/v4/'), 'https://chat.example.test');
   assert.equal(deriveSiteUrl('https://host.test:443/mm/api/v4'), 'https://host.test/mm');
   assert.equal(deriveSiteUrl('https://host.test'), 'https://host.test');
@@ -171,7 +177,7 @@ test('B1: site url is derived from the API url and used for the login page and c
   assert.deepEqual(nestedSite.context.cookieUrls, [['https://host.test/mm/']]);
 });
 
-test('B2: the rejected token cookie is skipped until a new valid cookie appears', async () => {
+test('B2: the rejected token cookie is skipped until a new valid cookie appears', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
   const login = createLoginTestContext({
     cookieSteps: [sessionCookie(REJECTED_TOKEN), sessionCookie(REJECTED_TOKEN), sessionCookie(REJECTED_TOKEN), sessionCookie(FRESH_TOKEN)],
   });
@@ -183,7 +189,7 @@ test('B2: the rejected token cookie is skipped until a new valid cookie appears'
   assert.deepEqual(login.validatedTokens, [FRESH_TOKEN]);
 });
 
-test('B3: a cookie rejected by the server is validated once and logged once', async () => {
+test('B3: a cookie rejected by the server is validated once and logged once', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
   const login = createLoginTestContext({
     cookieSteps: [
       sessionCookie(OTHER_TOKEN),
@@ -203,7 +209,7 @@ test('B3: a cookie rejected by the server is validated once and logged once', as
   assert.ok(login.messages.includes('session cookie rejected by /users/me (status 401), waiting for sign-in'));
 });
 
-test('B4: an unavailable validation is retried and then accepted', async () => {
+test('B4: an unavailable validation is retried and then accepted', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
   const login = createLoginTestContext({
     cookieSteps: [sessionCookie(FRESH_TOKEN)],
     validate: (_token, callIndex) =>
@@ -216,7 +222,7 @@ test('B4: an unavailable validation is retried and then accepted', async () => {
   assert.equal(login.validatedTokens.length, 2);
 });
 
-test('B5: without a rejected token a valid cookie is accepted after one read', async () => {
+test('B5: without a rejected token a valid cookie is accepted after one read', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
   const login = createLoginTestContext({ cookieSteps: [sessionCookie(FRESH_TOKEN)] });
   const result = login.start({ rejectedToken: undefined });
   await advanceUntil(login.clock, () => result.settled);
@@ -226,7 +232,7 @@ test('B5: without a rejected token a valid cookie is accepted after one read', a
   assert.equal(login.validatedTokens.length, 1);
 });
 
-test('B6: a validator that does not answer counts as unavailable after 10 s and is retried', async () => {
+test('B6: a validator that does not answer counts as unavailable after 10 s and is retried', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
   const login = createLoginTestContext({
     cookieSteps: [sessionCookie(FRESH_TOKEN)],
     validate: (_token, callIndex) => (callIndex === 0 ? 'never-resolves' : { kind: 'valid', statusDescription: 'status 200' }),
@@ -239,7 +245,7 @@ test('B6: a validator that does not answer counts as unavailable after 10 s and 
   assert.equal(await result.promise, FRESH_TOKEN);
 });
 
-test('B7: closing the last window ends the login with LOGIN_WINDOW_CLOSED', async () => {
+test('B7: closing the last window ends the login with LOGIN_WINDOW_CLOSED', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
   const login = createLoginTestContext({ cookieSteps: [[]] });
   const result = login.start();
   await advanceUntil(login.clock, () => login.context.cookieReadCount === 2);
@@ -252,7 +258,7 @@ test('B7: closing the last window ends the login with LOGIN_WINDOW_CLOSED', asyn
   assert.equal(login.context.closeCalls, 1);
 });
 
-test('B8: the context close event ends the login with LOGIN_WINDOW_CLOSED', async () => {
+test('B8: the context close event ends the login with LOGIN_WINDOW_CLOSED', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
   const login = createLoginTestContext({ cookieSteps: [[]] });
   const result = login.start();
   await advanceUntil(login.clock, () => login.context.cookieReadCount === 1);
@@ -263,7 +269,7 @@ test('B8: the context close event ends the login with LOGIN_WINDOW_CLOSED', asyn
   assert.equal(login.context.closeCalls, 1);
 });
 
-test('B9: a valid cookie on the step when the window closes is returned by the final check', async () => {
+test('B9: a valid cookie on the step when the window closes is returned by the final check', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
   const login = createLoginTestContext({ cookieSteps: [[]] });
   const result = login.start();
   await advanceUntil(login.clock, () => login.context.cookieReadCount === 2);
@@ -275,7 +281,7 @@ test('B9: a valid cookie on the step when the window closes is returned by the f
   assert.equal(login.context.closeCalls, 1);
 });
 
-test('B10: the login times out after the deadline with the last check description', async () => {
+test('B10: the login times out after the deadline with the last check description', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
   const login = createLoginTestContext({
     cookieSteps: [sessionCookie(FRESH_TOKEN)],
     validate: () => ({ kind: 'unavailable', statusDescription: 'status 503' }),
@@ -294,7 +300,7 @@ test('B10: the login times out after the deadline with the last check descriptio
   assert.equal(login.context.closeCalls, 1);
 });
 
-test('B11: an expired deadline fails before the browser is launched', async () => {
+test('B11: an expired deadline fails before the browser is launched', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
   const login = createLoginTestContext({ cookieSteps: [sessionCookie(FRESH_TOKEN)] });
   const result = login.start({ deadlineMilliseconds: START_MILLISECONDS });
   await flushAsyncWork();
@@ -303,7 +309,7 @@ test('B11: an expired deadline fails before the browser is launched', async () =
   assert.equal(login.launcher.launchCalls.length, 0);
 });
 
-test('B12: a window that does not close does not block the login longer than 5 s', async () => {
+test('B12: a window that does not close does not block the login longer than 5 s', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
   const login = createLoginTestContext({ cookieSteps: [sessionCookie(FRESH_TOKEN)], closeNeverResolves: true });
   const result = login.start();
   await advanceUntil(login.clock, () => result.settled);
@@ -436,7 +442,7 @@ test('B15: the manual install command quotes the browsers directory for the shel
   );
 });
 
-test('B17: hanging navigation and hanging cookie reads are bounded by their timeouts', async () => {
+test('B17: hanging navigation and hanging cookie reads are bounded by their timeouts', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
   const navigation = createLoginTestContext({ cookieSteps: [sessionCookie(FRESH_TOKEN)], gotoNeverResolves: true });
   const navigationResult = navigation.start();
   await advanceUntil(navigation.clock, () => navigationResult.settled);
@@ -454,6 +460,92 @@ test('B17: hanging navigation and hanging cookie reads are bounded by their time
     assert.ok(error.message.includes('cookie read timed out after 5 s'));
     return true;
   });
+});
+
+test('B18: the first session cookie that was not rejected is used when several cookies share the name', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
+  const withRejectedFirst = createLoginTestContext({
+    cookieSteps: [
+      [
+        { name: 'MMAUTHTOKEN', value: REJECTED_TOKEN },
+        { name: 'MMAUTHTOKEN', value: '' },
+        { name: 'MMAUTHTOKEN', value: FRESH_TOKEN },
+      ],
+    ],
+  });
+  const withRejectedFirstResult = withRejectedFirst.start();
+  await advanceUntil(withRejectedFirst.clock, () => withRejectedFirstResult.settled);
+  assert.equal(await withRejectedFirstResult.promise, FRESH_TOKEN);
+  assert.equal(withRejectedFirst.context.cookieReadCount, 1);
+  assert.deepEqual(withRejectedFirst.validatedTokens, [FRESH_TOKEN]);
+
+  const rejectedByServer = createLoginTestContext({
+    cookieSteps: [
+      [
+        { name: 'MMAUTHTOKEN', value: OTHER_TOKEN },
+        { name: 'MMAUTHTOKEN', value: FRESH_TOKEN },
+      ],
+    ],
+  });
+  const rejectedByServerResult = rejectedByServer.start({ rejectedToken: undefined });
+  await advanceUntil(rejectedByServer.clock, () => rejectedByServerResult.settled);
+  assert.equal(await rejectedByServerResult.promise, FRESH_TOKEN);
+  assert.deepEqual(rejectedByServer.validatedTokens, [OTHER_TOKEN, FRESH_TOKEN]);
+
+  const onlyRejected = createLoginTestContext({
+    cookieSteps: [[{ name: 'MMAUTHTOKEN', value: REJECTED_TOKEN }]],
+  });
+  const onlyRejectedResult = onlyRejected.start();
+  await advanceUntil(onlyRejected.clock, () => onlyRejectedResult.settled);
+  await assert.rejects(onlyRejectedResult.promise, (error: unknown) => {
+    assert.ok(error instanceof MattermostAuthenticationError);
+    assert.equal(error.code, 'LOGIN_TIMEOUT');
+    assert.ok(error.message.includes('session cookie was already rejected'));
+    return true;
+  });
+  assert.deepEqual(onlyRejected.validatedTokens, []);
+});
+
+test('B19: a missing page is opened with a time limit and a hanging or failing newPage ends with LOGIN_WINDOW_CLOSED', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
+  const opened = createLoginTestContext({ cookieSteps: [sessionCookie(FRESH_TOKEN)], withoutInitialPage: true });
+  const openedResult = opened.start();
+  await advanceUntil(opened.clock, () => openedResult.settled);
+  assert.equal(await openedResult.promise, FRESH_TOKEN);
+  assert.equal(opened.context.newPageCalls, 1);
+  assert.equal(opened.context.firstPage.gotoCalls.length, 1);
+
+  const hanging = createLoginTestContext({
+    cookieSteps: [sessionCookie(FRESH_TOKEN)],
+    withoutInitialPage: true,
+    newPageNeverResolves: true,
+  });
+  const hangingResult = hanging.start();
+  await advanceUntil(hanging.clock, () => hangingResult.settled);
+  await assert.rejects(hangingResult.promise, (error: unknown) => {
+    assert.ok(error instanceof MattermostAuthenticationError);
+    assert.equal(error.code, 'LOGIN_WINDOW_CLOSED');
+    assert.ok(error.message.includes('sign-in page did not open within 30 s'), error.message);
+    return true;
+  });
+  assert.equal(hanging.clock.now() - START_MILLISECONDS, 30_000);
+  assert.equal(hanging.context.cookieReadCount, 0);
+  assert.equal(hanging.context.closeCalls, 1);
+  assert.ok(hanging.messages.includes('sign-in page did not open within 30 s'));
+
+  const failing = createLoginTestContext({
+    cookieSteps: [sessionCookie(FRESH_TOKEN)],
+    withoutInitialPage: true,
+    newPageError: new Error('browserContext.newPage: Target page, context or browser has been closed\nCall log:\n  - details'),
+  });
+  const failingResult = failing.start();
+  await advanceUntil(failing.clock, () => failingResult.settled);
+  await assert.rejects(failingResult.promise, (error: unknown) => {
+    assert.ok(error instanceof MattermostAuthenticationError);
+    assert.equal(error.code, 'LOGIN_WINDOW_CLOSED');
+    assert.ok(error.message.includes('Target page, context or browser has been closed'), error.message);
+    assert.equal(error.message.includes('Call log'), false);
+    return true;
+  });
+  assert.equal(failing.context.closeCalls, 1);
 });
 
 test('B16: logged messages never contain cookie or token values', () => {
