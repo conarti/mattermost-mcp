@@ -43,7 +43,8 @@ test(
   async () => {
     const success = await runInstallationHost('success');
     assert.equal(success.result.standardOutput.length, 0);
-    assert.ok(success.result.standardError.includes('[auth] Chromium download 40% of 150.3 MiB'), success.result.standardError);
+    assert.ok(success.result.standardError.includes('[auth] Chromium download 40% of 182.1 MiB'), success.result.standardError);
+    assert.ok(success.result.standardError.includes('[auth] FFmpeg download 0% of 1 MiB'), success.result.standardError);
     assert.equal(success.result.code, 0, success.result.standardError);
 
     const record = JSON.parse(readFileSync(success.recordPath, 'utf8')) as {

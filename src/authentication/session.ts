@@ -19,6 +19,7 @@ import {
   AuthenticationTimings,
   BEARER_TOKEN_PREFIX,
   BROWSER_INSTALLATION_PROGRESS_MESSAGE,
+  CHROMIUM_DOWNLOAD_COMPONENT_NAME,
   CURRENT_USER_API_PATH,
   DEFAULT_AUTHENTICATION_TIMINGS,
   HTTP_GET_METHOD,
@@ -566,7 +567,10 @@ export class BrowserAuthenticationSession implements TokenProvider {
         temporaryRootDirectory: installationTemporaryDirectory,
         cancellationSignal: installationAbortController.signal,
         onProgress: (progress) => {
-          recovery.statusMessage = `${BROWSER_INSTALLATION_PROGRESS_MESSAGE}: ${progress.percent}% of ${progress.totalSizeDescription}`;
+          /* Маленький архив после Chromium назван явно, иначе его 0% выглядит как перезапуск загрузки Chromium */
+          const componentPrefix =
+            progress.componentName === CHROMIUM_DOWNLOAD_COMPONENT_NAME ? '' : `${progress.componentName} `;
+          recovery.statusMessage = `${BROWSER_INSTALLATION_PROGRESS_MESSAGE}: ${componentPrefix}${progress.percent}% of ${progress.totalSizeDescription}`;
         },
       }).then(
         (): InstallationOutcome => {

@@ -83,7 +83,7 @@ const STATIC_TOKEN = 'static-secret-token-0001';
 const EXPIRED_TOKEN = 'expired-secret-token-0002';
 const FRESH_TOKEN = 'fresh-secret-token-0003';
 const PROGRESS_TOKEN = 'progress-token-1';
-const INSTALLATION_PROGRESS: BrowserInstallationProgress = { percent: 40, totalSizeDescription: '150.3 MiB' };
+const INSTALLATION_PROGRESS: BrowserInstallationProgress = { componentName: 'Chromium', percent: 40, totalSizeDescription: '150.3 MiB' };
 const LOCK_EVENTS = {
   TRY_ACQUIRE: 'tryAcquire',
   TRY_BREAK_STALE: 'tryBreakStale',
@@ -1026,11 +1026,20 @@ test('N24: the lock holder installs Chromium before opening the window and repor
   assert.equal(notifications.length, 1);
   assert.equal(notifications[0].message, 'Downloading Chromium for Mattermost sign-in: 40% of 150.3 MiB (10 s)');
 
+  harness.installer.requests[0].onProgress({ componentName: 'FFmpeg', percent: 50, totalSizeDescription: '1 MiB' });
+  harness.clock.advance(10_000);
+  assert.equal(notifications.length, 2);
+  assert.equal(notifications[1].message, 'Downloading Chromium for Mattermost sign-in: FFmpeg 50% of 1 MiB (20 s)');
+  assert.deepEqual(
+    notifications.map((notification) => notification.progress),
+    [10, 20],
+  );
+
   harness.installer.pendingInstallations[0].resolve();
   await harness.browserLogin.waitForCalls(1);
   harness.clock.advance(10_000);
-  assert.equal(notifications.length, 2);
-  assert.match(notifications[1].message, /browser window/);
+  assert.equal(notifications.length, 3);
+  assert.match(notifications[2].message, /browser window/);
 
   harness.browserLogin.pendingResults[0].resolve(FRESH_TOKEN);
   assert.equal(await recovery.promise, FRESH_TOKEN);
@@ -1051,7 +1060,7 @@ test('N24: the lock holder installs Chromium before opening the window and repor
   assert.equal(harness.browserLogin.callCount, 1);
   assertOrderedFragments(harness.logs.messages, [
     `Chromium not found in ${harness.paths.browsersDirectory}, downloading`,
-    'Chromium installed in 10 s, sign-in timer started',
+    'Chromium installed in 20 s, sign-in timer started',
     'login lock acquired, opening browser window https://chat.example.test/login',
   ]);
 });

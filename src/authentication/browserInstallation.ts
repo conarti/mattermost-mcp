@@ -13,6 +13,7 @@ import {
   CHROMIUM_INSTALL_ARGUMENTS,
   CLOSE_EVENT,
   DATA_EVENT,
+  DOWNLOAD_COMPONENT_NAMES_BY_BUILD_NAME,
   END_EVENT,
   ERROR_EVENT,
   ERROR_HEADER_LINE_PATTERN,
@@ -20,6 +21,8 @@ import {
   INSPECTED_OBJECT_BRACKET_LINE_PATTERN,
   INSPECTED_PROPERTY_LINE_PATTERN,
   INSTALLATION_ABORT_REASONS,
+  INSTALLATION_DOWNLOAD_BUILD_NAME_PATTERN,
+  INSTALLATION_DOWNLOAD_START_PATTERN,
   INSTALLATION_FAILURE_MARKER,
   INSTALLATION_FAILURE_REASON_MAX_LENGTH,
   INSTALLATION_OUTPUT_LINE_LIMIT,
@@ -43,6 +46,7 @@ import {
   STACK_TRACE_LINE_PATTERN,
   TEMPORARY_DIRECTORY_VARIABLE,
   TEXT_FILE_ENCODING,
+  UNKNOWN_DOWNLOAD_COMPONENT_NAME,
   UNKNOWN_ERROR_CODE,
   URL_CREDENTIALS_PATTERN,
   URL_SCHEME_PREFIX_PATTERN,
@@ -62,16 +66,29 @@ import {
 import { ensurePrivateDirectory } from './stateFiles.js';
 
 export interface BrowserInstallationProgress {
+  /** Архив, который скачивается сейчас: Chromium, FFmpeg или Browser component */
+  componentName: string;
   percent: number;
   totalSizeDescription: string;
 }
 
-export function parseInstallationProgressLine(line: string): BrowserInstallationProgress | undefined {
+export function parseInstallationProgressLine(
+  line: string,
+): Pick<BrowserInstallationProgress, 'percent' | 'totalSizeDescription'> | undefined {
   const match = INSTALLATION_PROGRESS_PATTERN.exec(line);
   if (match === null) {
     return undefined;
   }
   return { percent: Number(match[1]), totalSizeDescription: match[2] };
+}
+
+/** Имя архива из строки начала загрузки или undefined для остального вывода */
+export function parseDownloadComponentName(line: string): string | undefined {
+  if (!INSTALLATION_DOWNLOAD_START_PATTERN.test(line)) {
+    return undefined;
+  }
+  const buildName = INSTALLATION_DOWNLOAD_BUILD_NAME_PATTERN.exec(line)?.[1] ?? '';
+  return DOWNLOAD_COMPONENT_NAMES_BY_BUILD_NAME.get(buildName) ?? UNKNOWN_DOWNLOAD_COMPONENT_NAME;
 }
 
 export type ResolveModulePath = (specifier: string, fromPath: string) => string;
@@ -432,13 +449,24 @@ export function createBrowserInstaller(dependencies: BrowserInstallerDependencie
 
       logger(`Chromium installation started (Playwright ${PINNED_PLAYWRIGHT_VERSION}, ${browsersDirectory})`);
       const startedAtMilliseconds = clock.now();
+      /* Playwright скачивает Chromium и FFmpeg подряд, и прогресс второго архива снова начинается с 0% */
+      let currentComponentName = UNKNOWN_DOWNLOAD_COMPONENT_NAME;
       let lastProgress: BrowserInstallationProgress | undefined;
       const handleStdoutLine = (line: string): void => {
-        const progress = parseInstallationProgressLine(line);
+        const componentName = parseDownloadComponentName(line);
+        if (componentName !== undefined) {
+          currentComponentName = componentName;
+          return;
+        }
+        const parsedProgress = parseInstallationProgressLine(line);
+        if (parsedProgress === undefined) {
+          return;
+        }
+        const progress: BrowserInstallationProgress = { componentName: currentComponentName, ...parsedProgress };
         if (
-          progress === undefined ||
-          (lastProgress?.percent === progress.percent &&
-            lastProgress.totalSizeDescription === progress.totalSizeDescription)
+          lastProgress?.componentName === progress.componentName &&
+          lastProgress.percent === progress.percent &&
+          lastProgress.totalSizeDescription === progress.totalSizeDescription
         ) {
           return;
         }
@@ -448,7 +476,7 @@ export function createBrowserInstaller(dependencies: BrowserInstallerDependencie
         } catch (error) {
           logFromEventHandler(`installation progress handler failed (${getErrorFirstLine(error)})`);
         }
-        logFromEventHandler(`Chromium download ${progress.percent}% of ${progress.totalSizeDescription}`);
+        logFromEventHandler(`${progress.componentName} download ${progress.percent}% of ${progress.totalSizeDescription}`);
       };
       const stdoutBuffer = new OutputLineBuffer(handleStdoutLine);
       const stderrBuffer = new OutputLineBuffer(() => undefined);

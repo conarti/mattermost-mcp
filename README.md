@@ -70,7 +70,7 @@ While the call waits, the server sends progress notifications every 10 seconds, 
 
 No manual installation is needed.
 
-- On the first sign-in the server downloads Chromium and ffmpeg for Playwright 1.63.0 (about 150 MiB on macOS arm64) into `~/.config/mattermost-mcp/browsers`. The client shows the progress as `Downloading Chromium for Mattermost sign-in`.
+- On the first sign-in the server downloads Chromium and ffmpeg for Playwright 1.63.0 (about 183 MiB on macOS arm64) into `~/.config/mattermost-mcp/browsers`. The client shows the progress as `Downloading Chromium for Mattermost sign-in: 40% of 182.1 MiB`, and for the small ffmpeg archive that follows as `Downloading Chromium for Mattermost sign-in: FFmpeg 50% of 1 MiB`.
 - The first call takes longer: the download is limited to 10 minutes, and the 5 minutes for sign-in start after the download has finished.
 - After an update of this package to a version with another Playwright version, the matching Chromium build is downloaded the same way.
 - Behind a proxy or with a download mirror, set `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`, `PLAYWRIGHT_DOWNLOAD_HOST` or `PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT` in the `env` of the MCP server entry.

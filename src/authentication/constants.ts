@@ -20,6 +20,16 @@ export const CHROMIUM_INSTALL_ARGUMENTS = ['install', 'chromium', '--no-shell'] 
 export const BROWSER_INSTALLATION_COMPLETE_MARKER_FILE_NAME = 'INSTALLATION_COMPLETE';
 export const INSTALLATION_FAILURE_MARKER = 'Failed to install browsers';
 export const INSTALLATION_PROGRESS_PATTERN = /(\d+)%\s+of\s+([\d.]+\s*\w+)/;
+/* Playwright печатает Downloading ${title} from ${url} перед каждой попыткой скачать архив, часть from может идти после ANSI-кода */
+export const INSTALLATION_DOWNLOAD_START_PATTERN = /^Downloading .+ from /;
+/* Заголовок архива заканчивается на (playwright chromium v1243) или (playwright ffmpeg v1011) */
+export const INSTALLATION_DOWNLOAD_BUILD_NAME_PATTERN = /\(playwright ([\w-]+) v\d+\)/;
+export const CHROMIUM_DOWNLOAD_COMPONENT_NAME = 'Chromium';
+export const UNKNOWN_DOWNLOAD_COMPONENT_NAME = 'Browser component';
+export const DOWNLOAD_COMPONENT_NAMES_BY_BUILD_NAME: ReadonlyMap<string, string> = new Map([
+  ['chromium', CHROMIUM_DOWNLOAD_COMPONENT_NAME],
+  ['ffmpeg', 'FFmpeg'],
+]);
 export const MISSING_BROWSER_EXECUTABLE_MARKER = "Executable doesn't exist";
 export const MISSING_SYSTEM_DEPENDENCIES_MARKER = 'Host system is missing dependencies';
 export const PROFILE_IN_USE_MARKERS = [

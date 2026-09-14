@@ -12,6 +12,7 @@ import {
   buildInstallationEnvironment,
   createBrowserInstaller,
   extractInstallationFailureReason,
+  parseDownloadComponentName,
   parseInstallationProgressLine,
   redactProxyCredentials,
   redactUrlCredentials,
@@ -46,6 +47,14 @@ const FAKE_NODE_EXECUTABLE_PATH = '/fake/bin/node';
 const LOCKED_DIRECTORY_MODE = 0o500;
 const PROGRESS_BAR_WIDTH = 80;
 const MANUAL_COMMAND = buildChromiumInstallCommand(BROWSERS_DIRECTORY);
+/* Строки logPolitely из downloadBrowserWithProgressBar в Playwright 1.63.0 */
+const CHROMIUM_DOWNLOAD_START_LINE =
+  'Downloading Chrome for Testing 153.0.8010.12 (playwright chromium v1243) from https://cdn.playwright.dev/builds/cft/153.0.8010.12/mac-arm64/chrome-mac-arm64.zip';
+const CHROMIUM_DOWNLOADED_LINE = `Chrome for Testing 153.0.8010.12 (playwright chromium v1243) downloaded to ${join(BROWSERS_DIRECTORY, 'chromium-1243')}`;
+/* Часть from Playwright печатает через colors.dim, при включённых цветах перед ней стоит ANSI-код */
+const FFMPEG_DOWNLOAD_START_LINE =
+  'Downloading FFmpeg (playwright ffmpeg v1011)\u001b[2m from https://cdn.playwright.dev/dbazure/download/playwright/builds/ffmpeg/1011/ffmpeg-mac-arm64.zip\u001b[22m';
+const FFMPEG_DOWNLOADED_LINE = `FFmpeg (playwright ffmpeg v1011) downloaded to ${join(BROWSERS_DIRECTORY, 'ffmpeg-1011')}`;
 
 const temporaryDirectories: string[] = [BROWSERS_ROOT_DIRECTORY];
 
@@ -185,12 +194,23 @@ test('R1: progress lines are parsed and other output is ignored', () => {
     percent: 100,
     totalSizeDescription: '1 MiB',
   });
-  assert.equal(
-    parseInstallationProgressLine('Downloading Chromium 153.0.8010.12 from https://cdn.playwright.dev/builds/cft/chrome.zip'),
-    undefined,
-  );
+  assert.equal(parseInstallationProgressLine(CHROMIUM_DOWNLOAD_START_LINE), undefined);
   assert.equal(parseInstallationProgressLine('Failed to install browsers'), undefined);
   assert.equal(parseInstallationProgressLine(''), undefined);
+
+  assert.equal(parseDownloadComponentName(CHROMIUM_DOWNLOAD_START_LINE), 'Chromium');
+  assert.equal(parseDownloadComponentName(FFMPEG_DOWNLOAD_START_LINE), 'FFmpeg');
+  assert.equal(
+    parseDownloadComponentName('Downloading Firefox 155.0 (playwright firefox v1543) from https://cdn.playwright.dev/builds/firefox/1543/firefox-mac-arm64.zip'),
+    'Browser component',
+  );
+  assert.equal(parseDownloadComponentName('Downloading archive from https://mirror.test/archive.zip'), 'Browser component');
+  assert.equal(parseDownloadComponentName(CHROMIUM_DOWNLOADED_LINE), undefined);
+  assert.equal(parseDownloadComponentName(fortyPercentLine), undefined);
+  assert.equal(
+    parseDownloadComponentName('Failed to download Chrome for Testing 153.0.8010.12 (playwright chromium v1243), caused by'),
+    undefined,
+  );
 });
 
 test('R2: the CLI path is resolved from the playwright package to playwright-core', () => {
@@ -280,7 +300,7 @@ test('R5: progress is reported from chunked output and success waits for the clo
   const { child } = await context.spawner.waitForLaunch();
 
   const fortyPercentLine = buildProgressLine(40);
-  child.writeStdout(`Downloading Chromium 153.0.8010.12 from https://cdn.playwright.dev/builds/cft/chrome.zip\n${buildProgressLine(10)}\n${fortyPercentLine.slice(0, 30)}`);
+  child.writeStdout(`${CHROMIUM_DOWNLOAD_START_LINE}\n${buildProgressLine(10)}\n${fortyPercentLine.slice(0, 30)}`);
   await flushAsyncWork();
   child.writeStdout(`${fortyPercentLine.slice(30)}\n${fortyPercentLine}\n`);
   await flushAsyncWork();
@@ -769,7 +789,7 @@ test('R17: exceptions from the progress callback and the logger in output handle
   const installation = context.start();
   const { child } = await context.spawner.waitForLaunch();
 
-  child.writeStdout(`${buildProgressLine(10)}\n${buildProgressLine(40)}\n`);
+  child.writeStdout(`${CHROMIUM_DOWNLOAD_START_LINE}\n${buildProgressLine(10)}\n${buildProgressLine(40)}\n`);
   await flushAsyncWork();
   assert.doesNotThrow(() => child.emitError(new Error('unexpected installer error')));
   child.writeStdout(buildProgressLine(100));
@@ -859,4 +879,64 @@ test('R20: cancellation while the temporary directory is prepared stops before s
   child.emitExit(0, null);
   await completedInstallation.promise;
   assert.equal(getEventListeners(completed.abortController.signal, 'abort').length, 0);
+});
+
+test('R23: progress of archives downloaded in a row is labelled by the current archive', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
+  const context = await createInstallerTestContext();
+  const installation = context.start();
+  const { child } = await context.spawner.waitForLaunch();
+
+  child.writeStdout(
+    [
+      CHROMIUM_DOWNLOAD_START_LINE,
+      buildProgressLine(0, '182.1 MiB'),
+      buildProgressLine(40, '182.1 MiB'),
+      buildProgressLine(100, '182.1 MiB'),
+      CHROMIUM_DOWNLOADED_LINE,
+      '',
+    ].join('\n'),
+  );
+  await flushAsyncWork();
+  child.writeStdout(
+    [
+      FFMPEG_DOWNLOAD_START_LINE,
+      buildProgressLine(0, '1 MiB'),
+      buildProgressLine(50, '1 MiB'),
+      buildProgressLine(100, '1 MiB'),
+      FFMPEG_DOWNLOADED_LINE,
+      '',
+    ].join('\n'),
+  );
+  await flushAsyncWork();
+  child.writeStdout(
+    [
+      'Downloading Chrome Headless Shell 153.0.8010.12 (playwright chromium-headless-shell v1243) from https://cdn.playwright.dev/builds/cft/153.0.8010.12/mac-arm64/chrome-headless-shell-mac-arm64.zip',
+      buildProgressLine(100, '1 MiB'),
+      '',
+    ].join('\n'),
+  );
+  child.emitExit(0, null);
+  await installation.promise;
+
+  assert.deepEqual(context.progressEvents, [
+    { componentName: 'Chromium', percent: 0, totalSizeDescription: '182.1 MiB' },
+    { componentName: 'Chromium', percent: 40, totalSizeDescription: '182.1 MiB' },
+    { componentName: 'Chromium', percent: 100, totalSizeDescription: '182.1 MiB' },
+    { componentName: 'FFmpeg', percent: 0, totalSizeDescription: '1 MiB' },
+    { componentName: 'FFmpeg', percent: 50, totalSizeDescription: '1 MiB' },
+    { componentName: 'FFmpeg', percent: 100, totalSizeDescription: '1 MiB' },
+    { componentName: 'Browser component', percent: 100, totalSizeDescription: '1 MiB' },
+  ]);
+  assert.deepEqual(
+    context.messages.filter((message) => message.includes(' download ')),
+    [
+      'Chromium download 0% of 182.1 MiB',
+      'Chromium download 40% of 182.1 MiB',
+      'Chromium download 100% of 182.1 MiB',
+      'FFmpeg download 0% of 1 MiB',
+      'FFmpeg download 50% of 1 MiB',
+      'FFmpeg download 100% of 1 MiB',
+      'Browser component download 100% of 1 MiB',
+    ],
+  );
 });
