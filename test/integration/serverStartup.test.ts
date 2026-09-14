@@ -7,10 +7,19 @@ import { join } from 'node:path';
 import { after, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { LATEST_PROTOCOL_VERSION } from '@modelcontextprotocol/sdk/types.js';
-import { DATA_EVENT, PROCESS_EXIT_EVENT, TEXT_FILE_ENCODING } from '../../src/authentication/constants.js';
+import {
+  AUTHENTICATION_MODES,
+  AUTHENTICATION_MODE_LOG_PREFIX,
+  DATA_EVENT,
+  PLAYWRIGHT_BROWSERS_PATH_VARIABLE,
+  PROCESS_EXIT_EVENT,
+  SERVER_SHUTDOWN_MESSAGE,
+  TEXT_FILE_ENCODING,
+} from '../../src/authentication/constants.js';
 import { resolveStatePaths } from '../../src/authentication/stateFiles.js';
 import { tools } from '../../src/tools/index.js';
 import {
+  FIXTURE_INTERRUPT_SIGNAL,
   FIXTURE_KILL_SIGNAL,
   FIXTURE_MATTERMOST_URL,
   FIXTURE_TEAM_ID,
@@ -45,6 +54,8 @@ interface JsonRpcMessage {
 
 interface ServerRun {
   standardOutputLines: string[];
+  /** Строки stdout, которые не разобрались как JSON, с текстом ошибки разбора */
+  standardOutputParseErrors: string[];
   standardError: string;
   toolNames: string[];
   exitCode: number | null;
@@ -52,10 +63,14 @@ interface ServerRun {
 }
 
 /** Сервер из build-test: для build/index.js конфиг нашёл бы отслеживаемый config.json с плейсхолдером токена */
-async function runServerUntilToolsList(homeDirectory: string, token: string | undefined): Promise<ServerRun> {
+async function runServerUntilToolsList(
+  homeDirectory: string,
+  token: string | undefined,
+  stopSignal: NodeJS.Signals = FIXTURE_TERMINATION_SIGNAL,
+): Promise<ServerRun> {
   const serverPath = fileURLToPath(new URL('../../src/index.js', import.meta.url));
   const environment: NodeJS.ProcessEnv = {
-    ...environmentWithout('MATTERMOST_TOKEN', 'PLAYWRIGHT_BROWSERS_PATH'),
+    ...environmentWithout('MATTERMOST_TOKEN', PLAYWRIGHT_BROWSERS_PATH_VARIABLE),
     HOME: homeDirectory,
     MATTERMOST_URL: FIXTURE_MATTERMOST_URL,
     MATTERMOST_TEAM_ID: FIXTURE_TEAM_ID,
@@ -67,7 +82,9 @@ async function runServerUntilToolsList(homeDirectory: string, token: string | un
   const server = spawn(process.execPath, [serverPath], { env: environment, stdio: ['pipe', 'pipe', 'pipe'] });
   startedServers.push(server);
 
-  let standardOutput = '';
+  let pendingStandardOutput = '';
+  const standardOutputLines: string[] = [];
+  const standardOutputParseErrors: string[] = [];
   let standardError = '';
   server.stdout.setEncoding(TEXT_FILE_ENCODING);
   server.stderr.setEncoding(TEXT_FILE_ENCODING);
@@ -79,18 +96,30 @@ async function runServerUntilToolsList(homeDirectory: string, token: string | un
     server.once(PROCESS_EXIT_EVENT, (code, signal) => resolve({ code, signal }));
   });
   const toolsListResponse = new Promise<JsonRpcMessage>((resolve, reject) => {
+    /* Исключение в обработчике data уронило бы процесс теста, поэтому ошибки разбора копятся и проверяются assert */
     server.stdout.on(DATA_EVENT, (chunk: string) => {
-      standardOutput += chunk;
-      const completeOutput = standardOutput.slice(0, standardOutput.lastIndexOf(OUTPUT_LINE_SEPARATOR) + 1);
-      for (const line of completeOutput.split(OUTPUT_LINE_SEPARATOR).filter((outputLine) => outputLine !== '')) {
-        const message = JSON.parse(line) as JsonRpcMessage;
-        if (message.id === TOOLS_LIST_REQUEST_ID) {
+      const lines = `${pendingStandardOutput}${chunk}`.split(OUTPUT_LINE_SEPARATOR);
+      pendingStandardOutput = lines.pop() ?? '';
+      for (const line of lines.filter((outputLine) => outputLine !== '')) {
+        standardOutputLines.push(line);
+        let message: JsonRpcMessage | null;
+        try {
+          message = JSON.parse(line) as JsonRpcMessage | null;
+        } catch (error) {
+          standardOutputParseErrors.push(`${error instanceof Error ? error.message : String(error)}: ${line}`);
+          continue;
+        }
+        if (message?.id === TOOLS_LIST_REQUEST_ID) {
           resolve(message);
         }
       }
     });
     void exited.then(({ code, signal }) =>
-      reject(new Error(`server exited before tools/list (code ${code}, signal ${signal})\nstderr:\n${standardError}`)),
+      reject(
+        new Error(
+          `server exited before tools/list (code ${code}, signal ${signal})\nstdout parse errors:\n${standardOutputParseErrors.join('\n')}\nstderr:\n${standardError}`,
+        ),
+      ),
     );
   });
 
@@ -117,12 +146,17 @@ async function runServerUntilToolsList(homeDirectory: string, token: string | un
 
   /* stdin остаётся открытым: процесс завершает только сигнал */
   assert.ok(server.pid !== undefined);
-  process.kill(server.pid, FIXTURE_TERMINATION_SIGNAL);
+  process.kill(server.pid, stopSignal);
   const { code, signal } = await exited;
   server.stdin.destroy();
+  if (pendingStandardOutput !== '') {
+    standardOutputLines.push(pendingStandardOutput);
+    standardOutputParseErrors.push(`line without a trailing line separator: ${pendingStandardOutput}`);
+  }
 
   return {
-    standardOutputLines: standardOutput.split(OUTPUT_LINE_SEPARATOR).filter((line) => line !== ''),
+    standardOutputLines,
+    standardOutputParseErrors,
     standardError,
     toolNames,
     exitCode: code,
@@ -136,10 +170,12 @@ async function createTemporaryHome(): Promise<string> {
   return directory;
 }
 
-function assertOnlyJsonRpcOnStandardOutput(lines: readonly string[]): void {
-  for (const line of lines) {
-    assert.doesNotThrow(() => JSON.parse(line), line);
-  }
+function assertOnlyJsonRpcOnStandardOutput(run: ServerRun): void {
+  assert.deepEqual(run.standardOutputParseErrors, [], `stdout has lines that are not JSON-RPC messages\nstderr:\n${run.standardError}`);
+}
+
+function countOccurrences(text: string, fragment: string): number {
+  return text.split(fragment).length - 1;
 }
 
 test(
@@ -153,8 +189,8 @@ test(
     assert.equal(run.toolNames.length, EXPECTED_TOOL_COUNT);
     assert.deepEqual(run.toolNames, tools.map((tool) => tool.name));
     assert.equal(existsSync(resolveStatePaths(homeDirectory).stateDirectory), false);
-    assert.ok(run.standardError.includes('Auth mode: browser'), run.standardError);
-    assertOnlyJsonRpcOnStandardOutput(run.standardOutputLines);
+    assert.ok(run.standardError.includes(`${AUTHENTICATION_MODE_LOG_PREFIX} ${AUTHENTICATION_MODES.BROWSER}`), run.standardError);
+    assertOnlyJsonRpcOnStandardOutput(run);
     assert.equal(run.exitSignal, null, run.standardError);
     assert.equal(run.exitCode, 0, run.standardError);
   },
@@ -169,11 +205,28 @@ test(
     const run = await runServerUntilToolsList(homeDirectory, STATIC_TOKEN);
 
     assert.equal(run.toolNames.length, EXPECTED_TOOL_COUNT);
-    assert.ok(run.standardError.includes('Auth mode: static'), run.standardError);
+    assert.ok(run.standardError.includes(`${AUTHENTICATION_MODE_LOG_PREFIX} ${AUTHENTICATION_MODES.STATIC}`), run.standardError);
     assertNoSecrets(run.standardError.split(OUTPUT_LINE_SEPARATOR), [STATIC_TOKEN]);
     assertNoSecrets(run.standardOutputLines, [STATIC_TOKEN]);
     assert.equal(existsSync(resolveStatePaths(homeDirectory).stateDirectory), false);
-    assertOnlyJsonRpcOnStandardOutput(run.standardOutputLines);
+    assertOnlyJsonRpcOnStandardOutput(run);
     assert.equal(run.exitSignal, FIXTURE_TERMINATION_SIGNAL);
+  },
+);
+
+test(
+  'U3: SIGINT prints the shutdown line once and exits with code 0 in browser and static modes',
+  { timeout: CHILD_PROCESS_TEST_TIMEOUT_MILLISECONDS },
+  async () => {
+    for (const token of [undefined, STATIC_TOKEN]) {
+      const homeDirectory = await createTemporaryHome();
+
+      const run = await runServerUntilToolsList(homeDirectory, token, FIXTURE_INTERRUPT_SIGNAL);
+
+      assert.equal(countOccurrences(run.standardError, SERVER_SHUTDOWN_MESSAGE), 1, run.standardError);
+      assertOnlyJsonRpcOnStandardOutput(run);
+      assert.equal(run.exitSignal, null, run.standardError);
+      assert.equal(run.exitCode, 0, run.standardError);
+    }
   },
 );

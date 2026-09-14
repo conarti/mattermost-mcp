@@ -2,6 +2,7 @@ import fetch from 'node-fetch';
 import { AuthenticationMode, Config, loadConfig } from './config.js';
 import {
   AUTHENTICATION_ERROR_CODES,
+  AUTHENTICATION_MODES,
   AUTHORIZATION_HEADER_NAME,
   BEARER_TOKEN_PREFIX,
   CONTENT_TYPE_HEADER_NAME,
@@ -34,6 +35,8 @@ import {
 
 const REQUEST_STILL_UNAUTHORIZED_MESSAGE = 'request still unauthorized after sign-in';
 const UNAUTHORIZED_AFTER_SIGN_IN_STATUS_DESCRIPTION = `${HTTP_STATUS_UNAUTHORIZED} Unauthorized after sign-in`;
+const REQUEST_CANCELLED_LOG_MESSAGE = 'caller cancelled, request not sent';
+const REQUEST_CANCELLED_DESCRIPTION = 'request cancelled by caller';
 
 const authenticationLogger = createStderrAuthenticationLogger();
 
@@ -93,9 +96,15 @@ export class MattermostClient {
     return this.tokenProvider.mode;
   }
 
+  /** Отмена вызова учитывается только в браузерном режиме: статический режим, как в 1.1.2, от неё не зависит */
+  private get cancellationSignal(): AbortSignal | undefined {
+    return this.tokenProvider.mode === AUTHENTICATION_MODES.BROWSER ? this.callContext.cancellationSignal : undefined;
+  }
+
   /** Ровно один повтор после 401: провайдер получает отвергнутый токен, в статическом режиме повтора нет */
   private async request<ResponseBody>(options: MattermostRequestOptions): Promise<ResponseBody> {
     const token = await this.tokenProvider.getToken(this.callContext);
+    this.throwIfCallCancelled(options);
     let response = await this.send(options, token);
 
     if (response.status === HTTP_STATUS_UNAUTHORIZED) {
@@ -103,6 +112,9 @@ export class MattermostClient {
       if (recoveredToken === undefined) {
         throw await this.createFailureError(options, response);
       }
+      /* Непрочитанное тело отвергнутого ответа держит соединение до сборки мусора */
+      await response.text().catch(() => undefined);
+      this.throwIfCallCancelled(options);
       response = await this.send(options, recoveredToken);
       if (response.status === HTTP_STATUS_UNAUTHORIZED) {
         authenticationLogger(REQUEST_STILL_UNAUTHORIZED_MESSAGE);
@@ -120,6 +132,17 @@ export class MattermostClient {
     return (await response.json()) as ResponseBody;
   }
 
+  /** Вход, дождавшийся отмены вызова, сохраняет токен в сессии, но действие вызова уже не отправляется */
+  private throwIfCallCancelled(options: MattermostRequestOptions): void {
+    if (this.cancellationSignal?.aborted) {
+      authenticationLogger(REQUEST_CANCELLED_LOG_MESSAGE);
+      throw new MattermostAuthenticationError(
+        AUTHENTICATION_ERROR_CODES.REQUEST_CANCELLED,
+        `${options.failureMessage}: ${REQUEST_CANCELLED_DESCRIPTION}`,
+      );
+    }
+  }
+
   private async send(options: MattermostRequestOptions, token: string): Promise<HttpResponse> {
     const response = await this.fetchImplementation(options.url, {
       method: options.method,
@@ -128,6 +151,7 @@ export class MattermostClient {
         [CONTENT_TYPE_HEADER_NAME]: JSON_CONTENT_TYPE,
       },
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
+      signal: this.cancellationSignal,
     });
 
     if (options.logResponseDiagnostics) {

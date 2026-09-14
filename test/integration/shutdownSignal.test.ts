@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { ChildProcessByStdio, spawn } from 'node:child_process';
+import { ChildProcessByStdio, execFileSync, spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import {
   CLOSE_EVENT,
   DATA_EVENT,
+  PLAYWRIGHT_BROWSERS_PATH_VARIABLE,
   PROCESS_EXIT_EVENT,
   TEXT_FILE_ENCODING,
 } from '../../src/authentication/constants.js';
@@ -30,10 +31,13 @@ import { environmentWithout, removeDirectories } from '../fixtures/runProcess.js
 const CHILD_PROCESS_TEST_TIMEOUT_MILLISECONDS = 30_000;
 const SHUTDOWN_LIMIT_MILLISECONDS = 2_000;
 const PROCESS_POLL_INTERVAL_MILLISECONDS = 20;
+const PROCESS_STATUS_COMMAND = 'ps';
+const PROCESS_COMMAND_LINE_ARGUMENTS = ['-ww', '-o', 'command=', '-p'] as const;
 
 const temporaryDirectories: string[] = [];
 const startedChildren: Array<ChildProcessByStdio<null, Readable, Readable>> = [];
 const fakeCliProcessIdPaths: string[] = [];
+const fakeCliPath = fileURLToPath(new URL(`../fixtures/${FIXTURE_FILE_NAMES.FAKE_PLAYWRIGHT_CLI}`, import.meta.url));
 
 after(async () => {
   /* Упавший тест не должен оставлять свои процессы: сигнал только по PID своих детей и фейкового cli.js */
@@ -44,12 +48,24 @@ after(async () => {
   }
   for (const processIdPath of fakeCliProcessIdPaths) {
     const processId = readProcessId(processIdPath);
-    if (processId !== undefined && isProcessAlive(processId)) {
+    /* PID из файла мог уже достаться чужому процессу, поэтому сигнал только процессу с путём фейкового cli.js в команде */
+    if (processId !== undefined && readProcessCommandLine(processId)?.includes(fakeCliPath)) {
       process.kill(processId, FIXTURE_KILL_SIGNAL);
     }
   }
   await removeDirectories(temporaryDirectories);
 });
+
+function readProcessCommandLine(processId: number): string | undefined {
+  try {
+    return execFileSync(PROCESS_STATUS_COMMAND, [...PROCESS_COMMAND_LINE_ARGUMENTS, String(processId)], {
+      encoding: TEXT_FILE_ENCODING,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+  } catch {
+    return undefined;
+  }
+}
 
 interface ExitResult {
   code: number | null;
@@ -82,7 +98,7 @@ async function createTemporaryHome(): Promise<string> {
 function startFixture(fixtureFileName: string, fixtureArguments: readonly string[]): StartedFixture {
   const fixturePath = fileURLToPath(new URL(`../fixtures/${fixtureFileName}`, import.meta.url));
   const child = spawn(process.execPath, [fixturePath, ...fixtureArguments], {
-    env: environmentWithout('PLAYWRIGHT_BROWSERS_PATH', 'MATTERMOST_TOKEN'),
+    env: environmentWithout(PLAYWRIGHT_BROWSERS_PATH_VARIABLE, 'MATTERMOST_TOKEN'),
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   startedChildren.push(child);

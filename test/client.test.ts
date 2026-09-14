@@ -41,7 +41,10 @@ const FIRST_PROVIDER_TOKEN = 'first-provider-token';
 const SECOND_PROVIDER_TOKEN = 'second-provider-token';
 const SESSION_EXPIRED_BODY = '{"id":"api.context.session_expired.app_error"}';
 const STILL_UNAUTHORIZED_LOG_LINE = '[auth] request still unauthorized after sign-in';
-const NON_API_MEMBER_NAMES = ['constructor', 'withCallContext', 'request', 'send', 'createFailureError'];
+const REQUEST_CANCELLED_LOG_LINE = '[auth] caller cancelled, request not sent';
+const SERVER_ERROR_BODY = '{"id":"app.internal_failure"}';
+const CHANNEL_ID = 'channel-1';
+const NON_API_MEMBER_NAMES = ['constructor', 'withCallContext', 'request', 'throwIfCallCancelled', 'send', 'createFailureError'];
 
 const CONFIG: Config = { mattermostUrl: MATTERMOST_URL, token: '', teamId: TEAM_ID };
 const SUCCESS_REPLY: FakeHttpReply = { status: 200, body: { id: USER_ID, order: [], posts: {} } };
@@ -112,18 +115,24 @@ interface PublicMethodCall {
   name: string;
   call: (client: MattermostClient) => Promise<unknown>;
   expectedRequests: Array<Pick<FakeHttpRecord, 'method' | 'url' | 'body'>>;
+  /** Текст ошибки 1.1.2 (git show 3c6dd0d:src/client.ts), когда последний запрос метода получил 500 с телом SERVER_ERROR_BODY */
+  serverErrorMessage: string;
 }
+
+const SERVER_ERROR_STATUS_DESCRIPTION = '500 Internal Server Error';
 
 const PUBLIC_METHOD_CALLS: readonly PublicMethodCall[] = [
   {
     name: 'getChannels',
     call: (client) => client.getChannels(),
     expectedRequests: [{ method: 'GET', url: `${MATTERMOST_URL}/teams/${TEAM_ID}/channels?page=0&per_page=100`, body: undefined }],
+    serverErrorMessage: `Failed to get channels: ${SERVER_ERROR_STATUS_DESCRIPTION} - ${SERVER_ERROR_BODY}`,
   },
   {
     name: 'getChannel',
     call: (client) => client.getChannel('channel-1'),
     expectedRequests: [{ method: 'GET', url: `${MATTERMOST_URL}/channels/channel-1`, body: undefined }],
+    serverErrorMessage: `Failed to get channel: ${SERVER_ERROR_STATUS_DESCRIPTION}`,
   },
   {
     name: 'createPost',
@@ -131,6 +140,7 @@ const PUBLIC_METHOD_CALLS: readonly PublicMethodCall[] = [
     expectedRequests: [
       { method: 'POST', url: `${MATTERMOST_URL}/posts`, body: '{"channel_id":"channel-1","message":"hello","root_id":"root-1"}' },
     ],
+    serverErrorMessage: `Failed to create post: ${SERVER_ERROR_STATUS_DESCRIPTION}`,
   },
   {
     name: 'getPostsForChannel',
@@ -142,46 +152,55 @@ const PUBLIC_METHOD_CALLS: readonly PublicMethodCall[] = [
         body: undefined,
       },
     ],
+    serverErrorMessage: `Failed to get posts: ${SERVER_ERROR_STATUS_DESCRIPTION}`,
   },
   {
     name: 'getAllPostsForChannel',
     call: (client) => client.getAllPostsForChannel('channel-1'),
     expectedRequests: [{ method: 'GET', url: `${MATTERMOST_URL}/channels/channel-1/posts?page=0&per_page=200`, body: undefined }],
+    serverErrorMessage: `Failed to get posts: ${SERVER_ERROR_STATUS_DESCRIPTION}`,
   },
   {
     name: 'getPost',
     call: (client) => client.getPost('post-1'),
     expectedRequests: [{ method: 'GET', url: `${MATTERMOST_URL}/posts/post-1`, body: undefined }],
+    serverErrorMessage: `Failed to get post: ${SERVER_ERROR_STATUS_DESCRIPTION}`,
   },
   {
     name: 'getPostThread',
     call: (client) => client.getPostThread('post-1'),
     expectedRequests: [{ method: 'GET', url: `${MATTERMOST_URL}/posts/post-1/thread`, body: undefined }],
+    serverErrorMessage: `Failed to get post thread: ${SERVER_ERROR_STATUS_DESCRIPTION}`,
   },
   {
     name: 'addReaction',
     call: (client) => client.addReaction('post-1', 'thumbsup'),
     expectedRequests: [{ method: 'POST', url: `${MATTERMOST_URL}/reactions`, body: '{"post_id":"post-1","emoji_name":"thumbsup"}' }],
+    serverErrorMessage: `Failed to add reaction: ${SERVER_ERROR_STATUS_DESCRIPTION}`,
   },
   {
     name: 'getUsers',
     call: (client) => client.getUsers(),
     expectedRequests: [{ method: 'GET', url: `${MATTERMOST_URL}/users?page=0&per_page=100`, body: undefined }],
+    serverErrorMessage: `Failed to get users: ${SERVER_ERROR_STATUS_DESCRIPTION}`,
   },
   {
     name: 'getUserProfile',
     call: (client) => client.getUserProfile(OTHER_USER_ID),
     expectedRequests: [{ method: 'GET', url: `${MATTERMOST_URL}/users/${OTHER_USER_ID}`, body: undefined }],
+    serverErrorMessage: `Failed to get user profile: ${SERVER_ERROR_STATUS_DESCRIPTION}`,
   },
   {
     name: 'getMe',
     call: (client) => client.getMe(),
     expectedRequests: [{ method: 'GET', url: `${MATTERMOST_URL}/users/me`, body: undefined }],
+    serverErrorMessage: `Failed to get current user: ${SERVER_ERROR_STATUS_DESCRIPTION}`,
   },
   {
     name: 'getMyChannels',
     call: (client) => client.getMyChannels(),
     expectedRequests: [{ method: 'GET', url: `${MATTERMOST_URL}/users/me/channels?page=0&per_page=100`, body: undefined }],
+    serverErrorMessage: `Failed to get user channels: ${SERVER_ERROR_STATUS_DESCRIPTION} - ${SERVER_ERROR_BODY}`,
   },
   {
     name: 'createDirectMessageChannel',
@@ -190,6 +209,7 @@ const PUBLIC_METHOD_CALLS: readonly PublicMethodCall[] = [
       { method: 'GET', url: `${MATTERMOST_URL}/users/me`, body: undefined },
       { method: 'POST', url: `${MATTERMOST_URL}/channels/direct`, body: `["${USER_ID}","${OTHER_USER_ID}"]` },
     ],
+    serverErrorMessage: `Failed to create direct message channel: ${SERVER_ERROR_STATUS_DESCRIPTION} - ${SERVER_ERROR_BODY}`,
   },
 ];
 
@@ -430,4 +450,114 @@ test('C6: two call views that get 401 at the same time share one browser sign-in
     (record) => record.url === `${MATTERMOST_URL}/users/me` && record.authorization === `Bearer ${EXPIRED_TOKEN}`,
   );
   assert.equal(rejectedRequests.length, 2);
+});
+
+test('C7: a call cancelled while waiting for sign-in sends no action request, and the sign-in still saves the token', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async (t) => {
+  const errorOutput = t.mock.method(console, 'error', () => undefined);
+  const postsUrl = `${MATTERMOST_URL}/posts`;
+  const cases = [
+    { description: 'without a token file the wait is in getToken', storedToken: undefined, expectedPostRequestCount: 0 },
+    { description: 'with an expired token the wait is in recoverFromUnauthorized', storedToken: EXPIRED_TOKEN, expectedPostRequestCount: 1 },
+  ];
+
+  for (const { description, storedToken, expectedPostRequestCount } of cases) {
+    const homeDirectory = await createTemporaryHome();
+    const clock = new FakeClock(START_MILLISECONDS);
+    const logs = createLogCapture();
+    const launcher = new FakeLoginBrowserLauncher(
+      new FakeLoginBrowserContext({ cookieSteps: [[], [], [{ name: SESSION_COOKIE_NAME, value: FRESH_TOKEN }]] }),
+    );
+    const http = new FakeHttp(createTokenScenario({ [FRESH_TOKEN]: { status: 200, body: { id: USER_ID } } }, UNAUTHORIZED_REPLY));
+    const tokenProvider = createTokenProvider(CONFIG, http.fetch, { homeDirectory, launcher, clock, logger: logs.logger });
+    const tokenStore = createFileTokenStore(resolveStatePaths(homeDirectory), () => undefined);
+    if (storedToken !== undefined) {
+      await tokenStore.writeToken(SITE_URL, storedToken);
+    }
+    const client = new MattermostClient({ config: CONFIG, tokenProvider, fetchImplementation: http.fetch });
+    const cancellation = new AbortController();
+    const callContext = createToolCallContext({
+      progressToken: undefined,
+      sendProgressNotification: async () => undefined,
+      cancellationSignal: cancellation.signal,
+      logger: logs.logger,
+    });
+    const cancelledLogCountBefore = printedLines(errorOutput.mock.calls).filter((line) => line === REQUEST_CANCELLED_LOG_LINE).length;
+
+    const call = trackPromise(client.withCallContext(callContext).createPost(CHANNEL_ID, 'hello'));
+    await waitForCondition(() => launcher.launchCalls.length === 1);
+    cancellation.abort();
+    await advanceClockUntilSettled(clock, call, { maximumSteps: 20 });
+
+    assert.ok(call.error instanceof MattermostAuthenticationError, `${description}: ${String(call.error ?? call.value)}`);
+    assert.equal(call.error.code, AUTHENTICATION_ERROR_CODES.REQUEST_CANCELLED, description);
+    assert.equal(call.error.message, '[REQUEST_CANCELLED] Failed to create post: request cancelled by caller', description);
+    assert.equal(http.records.filter((record) => record.url === postsUrl).length, expectedPostRequestCount, description);
+    assert.equal(logs.count('session token saved'), 1, description);
+    assert.equal(await tokenStore.readToken(SITE_URL), FRESH_TOKEN, description);
+    assert.equal(
+      printedLines(errorOutput.mock.calls).filter((line) => line === REQUEST_CANCELLED_LOG_LINE).length - cancelledLogCountBefore,
+      1,
+      description,
+    );
+  }
+});
+
+test('C8: browser mode passes the call cancellation signal to HTTP requests, static mode ignores cancellation as in 1.1.2', async (t) => {
+  t.mock.method(console, 'error', () => undefined);
+  const cancellation = new AbortController();
+  const callContext = createToolCallContext({
+    progressToken: undefined,
+    sendProgressNotification: async () => undefined,
+    cancellationSignal: cancellation.signal,
+    logger: () => undefined,
+  });
+
+  const browserHttp = new FakeHttp(() => SUCCESS_REPLY);
+  const browserClient = createClient(new ScriptedTokenProvider(AUTHENTICATION_MODES.BROWSER, FRESH_TOKEN, undefined), browserHttp);
+  await browserClient.withCallContext(callContext).getMe();
+  await browserClient.getMe();
+  assert.deepEqual(
+    browserHttp.records.map((record) => record.signal),
+    [cancellation.signal, undefined],
+  );
+
+  const staticHttp = new FakeHttp(() => SUCCESS_REPLY);
+  const staticClient = createClient(new StaticTokenProvider(STATIC_TOKEN), staticHttp);
+  cancellation.abort();
+  await staticClient.withCallContext(callContext).createPost(CHANNEL_ID, 'hello');
+  assert.equal(staticHttp.records.length, 1);
+  assert.equal(staticHttp.records[0].signal, undefined);
+
+  await assert.rejects(browserClient.withCallContext(callContext).createPost(CHANNEL_ID, 'hello'), {
+    code: AUTHENTICATION_ERROR_CODES.REQUEST_CANCELLED,
+  });
+  assert.equal(browserHttp.records.length, 2);
+});
+
+test('C9: a 500 response with a body keeps the 1.1.2 error text of every public method in both modes', async (t) => {
+  t.mock.method(console, 'error', () => undefined);
+  const providers: TokenProvider[] = [
+    new StaticTokenProvider(STATIC_TOKEN),
+    new ScriptedTokenProvider(AUTHENTICATION_MODES.BROWSER, FRESH_TOKEN, FRESH_TOKEN),
+  ];
+
+  for (const tokenProvider of providers) {
+    for (const { name, call, expectedRequests, serverErrorMessage } of PUBLIC_METHOD_CALLS) {
+      const failingRequest = expectedRequests[expectedRequests.length - 1];
+      const http = new FakeHttp((_token, record) =>
+        record.method === failingRequest.method && record.url === failingRequest.url
+          ? { status: 500, body: SERVER_ERROR_BODY }
+          : SUCCESS_REPLY,
+      );
+      const description = `${tokenProvider.mode} ${name}`;
+
+      await assert.rejects(call(createClient(tokenProvider, http)), (error: unknown) => {
+        assert.ok(error instanceof Error, description);
+        assert.equal(error instanceof MattermostAuthenticationError, false, description);
+        assert.equal(error.message, serverErrorMessage, description);
+        return true;
+      });
+      assert.deepEqual(describeRequests(http.records), expectedRequests, description);
+    }
+  }
 });

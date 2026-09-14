@@ -2,20 +2,22 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
-  CallToolRequest,
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { tools, executeTool, setTopicMonitorInstance } from "./tools/index.js";
+import { tools } from "./tools/index.js";
+import { startAndRegisterTopicMonitor } from "./tools/monitoring.js";
+import { createCallToolHandler } from "./callToolHandler.js";
 import { MattermostClient } from "./client.js";
 import { loadConfig, resolveAuthenticationMode } from "./config.js";
 import { TopicMonitor } from "./monitor/index.js";
-import { AUTHENTICATION_MODES, PROGRESS_NOTIFICATION_METHOD } from "./authentication/constants.js";
+import {
+  AUTHENTICATION_MODES,
+  AUTHENTICATION_MODE_LOG_PREFIX,
+  SERVER_SHUTDOWN_MESSAGE,
+} from "./authentication/constants.js";
 import { createStderrAuthenticationLogger, installProcessShutdownHandlers } from "./authentication/runtime.js";
-import { createToolCallContext } from "./authentication/session.js";
 import { resolveStatePaths } from "./authentication/stateFiles.js";
-
-const AUTHENTICATION_MODE_LOG_PREFIX = "Auth mode:";
 
 const authenticationLogger = createStderrAuthenticationLogger();
 
@@ -52,14 +54,7 @@ async function main() {
     try {
       console.error("Initializing topic monitor...");
       topicMonitor = new TopicMonitor(client, config.monitoring);
-      /* В браузерном режиме start() без токена отклоняется: неинициализированный экземпляр не отдаётся инструменту, и тот создаст свой после входа */
-      if (client.authenticationMode === AUTHENTICATION_MODES.BROWSER) {
-        await topicMonitor.start();
-        setTopicMonitorInstance(topicMonitor);
-      } else {
-        setTopicMonitorInstance(topicMonitor);
-        await topicMonitor.start();
-      }
+      await startAndRegisterTopicMonitor(topicMonitor, client.authenticationMode);
       console.error("Topic monitor started successfully");
     } catch (error) {
       console.error("Failed to initialize topic monitor:", error);
@@ -71,7 +66,10 @@ async function main() {
 
   /* Окно Chromium может быть открыто во время вызова: сервер завершается по SIGTERM и SIGHUP, а обработчик exit Playwright закрывает браузер */
   if (client.authenticationMode === AUTHENTICATION_MODES.BROWSER) {
-    installProcessShutdownHandlers(() => topicMonitor?.stop());
+    installProcessShutdownHandlers(() => {
+      console.error(SERVER_SHUTDOWN_MESSAGE);
+      topicMonitor?.stop();
+    });
   }
 
   // Initialize MCP server
@@ -96,37 +94,10 @@ async function main() {
   });
 
   // Register tool execution handler
-  server.setRequestHandler(CallToolRequestSchema, async (request: CallToolRequest, extra) => {
-    console.error(`Received CallToolRequest for tool: ${request.params.name}`);
-    const callContext = createToolCallContext({
-      progressToken: request.params._meta?.progressToken,
-      sendProgressNotification: (parameters) =>
-        server.notification({ method: PROGRESS_NOTIFICATION_METHOD, params: parameters }),
-      cancellationSignal: extra.signal,
-      logger: authenticationLogger,
-    });
-
-    try {
-      if (!request.params.arguments) {
-        throw new Error("No arguments provided");
-      }
-
-      return await executeTool(client, request.params.name, request.params.arguments, callContext);
-    } catch (error) {
-      console.error("Error executing tool:", error);
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({
-              error: error instanceof Error ? error.message : String(error),
-            }),
-          },
-        ],
-        isError: true,
-      };
-    }
-  });
+  server.setRequestHandler(
+    CallToolRequestSchema,
+    createCallToolHandler({ server, client, logger: authenticationLogger }),
+  );
 
   // Connect to transport
   const transport = new StdioServerTransport();
@@ -159,7 +130,7 @@ async function main() {
   
   // Handle process termination
   process.on('SIGINT', () => {
-    console.error("Shutting down Mattermost MCP Server...");
+    console.error(SERVER_SHUTDOWN_MESSAGE);
     if (topicMonitor) {
       topicMonitor.stop();
     }

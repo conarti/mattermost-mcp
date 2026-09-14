@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { after, test } from 'node:test';
 import {
   AUTHENTICATION_ERROR_CODES,
+  AUTHENTICATION_LOG_PREFIX,
   AUTHENTICATION_MODES,
   CURRENT_USER_API_PATH,
 } from '../../src/authentication/constants.js';
@@ -19,7 +20,7 @@ import {
 import { resolveStatePaths } from '../../src/authentication/stateFiles.js';
 import { MattermostClient } from '../../src/client.js';
 import type { Config, MonitoringConfig } from '../../src/config.js';
-import { TopicMonitor } from '../../src/monitor/index.js';
+import { MONITORING_RUN_SKIPPED_MESSAGE, TopicMonitor } from '../../src/monitor/index.js';
 import { handleRunMonitoring, setTopicMonitorInstance } from '../../src/tools/monitoring.js';
 import { createLogCapture } from '../fixtures/captureLogs.js';
 import { FakeClock } from '../fixtures/fakeClock.js';
@@ -40,7 +41,7 @@ const MONITORED_CHANNEL_ID = 'channel-1';
 const CHANNELS_URL = `${MATTERMOST_URL}/teams/${TEAM_ID}/channels?page=0&per_page=100`;
 const POSTS_URL = `${MATTERMOST_URL}/channels/${MONITORED_CHANNEL_ID}/posts?page=0&per_page=10`;
 const CURRENT_USER_URL = `${MATTERMOST_URL}${CURRENT_USER_API_PATH}`;
-const MONITORING_SKIPPED_LOG_LINE = `[auth] monitoring run skipped: ${AUTHENTICATION_ERROR_CODES.AUTHENTICATION_REQUIRED}`;
+const MONITORING_SKIPPED_LOG_LINE = `${AUTHENTICATION_LOG_PREFIX} ${MONITORING_RUN_SKIPPED_MESSAGE}: ${AUTHENTICATION_ERROR_CODES.AUTHENTICATION_REQUIRED}`;
 
 const MONITORING_CONFIG: MonitoringConfig = {
   enabled: true,
@@ -128,7 +129,7 @@ test('M2: browser mode run monitoring tool signs in interactively first and repo
   const client = new MattermostClient({ config: BROWSER_CONFIG, tokenProvider, fetchImplementation: http.fetch });
   const callContext = createInteractiveContext();
 
-  const result = await handleRunMonitoring(client.withCallContext(callContext), {});
+  const result = await handleRunMonitoring(client.withCallContext(callContext), {}, () => MONITORING_CONFIG);
 
   assert.equal(result.isError, true);
   assert.ok(readResultText(result).includes(`[${AUTHENTICATION_ERROR_CODES.LOGIN_WINDOW_CLOSED}]`), readResultText(result));
@@ -214,4 +215,157 @@ test('M5: monitor start in a browser session without a token file and without us
   assert.equal(monitor.isRunning(), false);
   assert.equal(launcher.launchCalls.length, 0);
   assert.equal(http.records.length, 0);
+});
+
+const CHANNELS_URL_PREFIX = `${MATTERMOST_URL}/teams/${TEAM_ID}/channels`;
+const CHANNEL_POSTS_URL_PREFIX = `${MATTERMOST_URL}/channels/${MONITORED_CHANNEL_ID}/posts`;
+const USERS_URL_PREFIX = `${MATTERMOST_URL}/users?`;
+const CREATE_POST_URL = `${MATTERMOST_URL}/posts`;
+const MONITORED_POST_ID = 'post-1';
+const POST_AUTHOR_ID = 'user-9';
+const POST_AUTHOR_PROFILE_URL = `${MATTERMOST_URL}/users/${POST_AUTHOR_ID}`;
+
+interface MonitorAuthenticationErrorCase {
+  description: string;
+  monitoringConfig: MonitoringConfig;
+  unauthorizedUrlPrefixes: readonly string[];
+  serverErrorUrlPrefixes: readonly string[];
+  run: (monitor: TopicMonitor) => Promise<void>;
+  /** Все запросы по порядку: путь дошёл до нужного catch и остановился на ошибке авторизации */
+  expectedUrlPrefixes: readonly string[];
+}
+
+function createAuthenticationErrorScenario(
+  unauthorizedUrlPrefixes: readonly string[],
+  serverErrorUrlPrefixes: readonly string[],
+): FakeHttpScenario {
+  return (_token, record) => {
+    const matchesAny = (prefixes: readonly string[]) => prefixes.some((prefix) => record.url.startsWith(prefix));
+    if (matchesAny(unauthorizedUrlPrefixes)) {
+      return { status: 401 };
+    }
+    if (matchesAny(serverErrorUrlPrefixes)) {
+      return { status: 500, body: 'internal failure' };
+    }
+    if (record.url.startsWith(CHANNELS_URL_PREFIX)) {
+      return { status: 200, body: [{ id: MONITORED_CHANNEL_ID, name: MONITORED_CHANNEL_NAME, type: 'O' }] };
+    }
+    if (record.url.startsWith(CHANNEL_POSTS_URL_PREFIX)) {
+      return {
+        status: 200,
+        body: {
+          order: [MONITORED_POST_ID],
+          posts: {
+            [MONITORED_POST_ID]: {
+              id: MONITORED_POST_ID,
+              user_id: POST_AUTHOR_ID,
+              channel_id: MONITORED_CHANNEL_ID,
+              message: 'release is planned for today',
+              create_at: START_MILLISECONDS,
+            },
+          },
+        },
+      };
+    }
+    return { status: 200, body: { id: POST_AUTHOR_ID, username: 'post-author' } };
+  };
+}
+
+async function assertMonitorRethrowsAuthenticationErrors(cases: readonly MonitorAuthenticationErrorCase[]): Promise<void> {
+  for (const { description, monitoringConfig, unauthorizedUrlPrefixes, serverErrorUrlPrefixes, run, expectedUrlPrefixes } of cases) {
+    const http = new FakeHttp(createAuthenticationErrorScenario(unauthorizedUrlPrefixes, serverErrorUrlPrefixes));
+    const tokenProvider = new RecordingTokenProvider(AUTHENTICATION_MODES.BROWSER, SESSION_TOKEN, async () => {
+      throw new MattermostAuthenticationError(
+        AUTHENTICATION_ERROR_CODES.AUTHENTICATION_REQUIRED,
+        'Mattermost sign-in is required, but background requests do not open the sign-in window.',
+      );
+    });
+    const client = new MattermostClient({ config: BROWSER_CONFIG, tokenProvider, fetchImplementation: http.fetch });
+    const monitor = new TopicMonitor(client, monitoringConfig);
+
+    await assert.rejects(run(monitor), (error: unknown) => {
+      assert.ok(error instanceof MattermostAuthenticationError, `${description}: ${String(error)}`);
+      assert.equal(error.code, AUTHENTICATION_ERROR_CODES.AUTHENTICATION_REQUIRED, description);
+      return true;
+    }, description);
+
+    assert.equal(monitor.isRunning(), false, description);
+    const requestedUrls = http.records.map((record) => record.url);
+    assert.equal(requestedUrls.length, expectedUrlPrefixes.length, `${description}: ${requestedUrls.join(', ')}`);
+    expectedUrlPrefixes.forEach((prefix, index) => {
+      assert.ok(requestedUrls[index].startsWith(prefix), `${description}: request ${index} ${requestedUrls[index]} is not ${prefix}`);
+    });
+  }
+}
+
+test('M6: monitor runs and notification channel lookup rethrow authentication errors instead of swallowing them', async (t) => {
+  t.mock.method(console, 'error', () => undefined);
+  const withoutNotificationChannel: MonitoringConfig = { ...MONITORING_CONFIG, notificationChannelId: '' };
+
+  await assertMonitorRethrowsAuthenticationErrors([
+    {
+      description: 'processChannel while reading channel posts',
+      monitoringConfig: MONITORING_CONFIG,
+      unauthorizedUrlPrefixes: [CHANNEL_POSTS_URL_PREFIX],
+      serverErrorUrlPrefixes: [],
+      run: (monitor) => monitor.runNow(),
+      expectedUrlPrefixes: [CHANNELS_URL_PREFIX, CHANNEL_POSTS_URL_PREFIX],
+    },
+    {
+      description: 'processChannel while sending the notification',
+      monitoringConfig: MONITORING_CONFIG,
+      unauthorizedUrlPrefixes: [CREATE_POST_URL],
+      serverErrorUrlPrefixes: [],
+      run: (monitor) => monitor.runNow(),
+      expectedUrlPrefixes: [CHANNELS_URL_PREFIX, CHANNEL_POSTS_URL_PREFIX, CREATE_POST_URL],
+    },
+    {
+      description: 'notification channel lookup while listing channels',
+      monitoringConfig: withoutNotificationChannel,
+      unauthorizedUrlPrefixes: [CHANNELS_URL_PREFIX],
+      serverErrorUrlPrefixes: [],
+      run: (monitor) => monitor.start(),
+      expectedUrlPrefixes: [CHANNELS_URL_PREFIX],
+    },
+    {
+      description: 'notification channel lookup while creating the direct message channel',
+      monitoringConfig: withoutNotificationChannel,
+      unauthorizedUrlPrefixes: [CURRENT_USER_URL],
+      serverErrorUrlPrefixes: [],
+      run: (monitor) => monitor.start(),
+      expectedUrlPrefixes: [CHANNELS_URL_PREFIX, CURRENT_USER_URL],
+    },
+  ]);
+});
+
+test('M7: current user lookup rethrows an authentication error from each fallback step without masking by the other', async (t) => {
+  t.mock.method(console, 'error', () => undefined);
+  const withoutUserId: MonitoringConfig = { ...MONITORING_CONFIG, userId: '' };
+
+  await assertMonitorRethrowsAuthenticationErrors([
+    {
+      description: 'getUsers fails with an authentication error while the channel fallback works',
+      monitoringConfig: withoutUserId,
+      unauthorizedUrlPrefixes: [USERS_URL_PREFIX],
+      serverErrorUrlPrefixes: [],
+      run: (monitor) => monitor.start(),
+      expectedUrlPrefixes: [USERS_URL_PREFIX],
+    },
+    {
+      description: 'getUsers answers 500 and getChannels fails with an authentication error',
+      monitoringConfig: withoutUserId,
+      unauthorizedUrlPrefixes: [CHANNELS_URL_PREFIX],
+      serverErrorUrlPrefixes: [USERS_URL_PREFIX],
+      run: (monitor) => monitor.start(),
+      expectedUrlPrefixes: [USERS_URL_PREFIX, CHANNELS_URL_PREFIX],
+    },
+    {
+      description: 'getUsers answers 500 and the post author profile fails with an authentication error',
+      monitoringConfig: withoutUserId,
+      unauthorizedUrlPrefixes: [POST_AUTHOR_PROFILE_URL],
+      serverErrorUrlPrefixes: [USERS_URL_PREFIX],
+      run: (monitor) => monitor.start(),
+      expectedUrlPrefixes: [USERS_URL_PREFIX, CHANNELS_URL_PREFIX, CHANNEL_POSTS_URL_PREFIX, POST_AUTHOR_PROFILE_URL],
+    },
+  ]);
 });

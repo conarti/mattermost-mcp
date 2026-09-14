@@ -1,11 +1,9 @@
 /**
  * Держатель login.lock с открытым фейковым окном входа, которое не отдаёт cookie.
- * Печатает строку waiting, когда появился login.lock, и ждёт сигнала от теста.
+ * Печатает строку waiting, когда фейковое окно открыто, и ждёт сигнала от теста.
  */
-import { existsSync } from 'node:fs';
 import { createStderrAuthenticationLogger, installProcessShutdownHandlers } from '../../src/authentication/runtime.js';
 import { createTokenProvider, createToolCallContext } from '../../src/authentication/session.js';
-import { resolveStatePaths } from '../../src/authentication/stateFiles.js';
 import type { Config } from '../../src/config.js';
 import type { HttpFetch } from '../../src/types.js';
 import { FakeLoginBrowserContext, FakeLoginBrowserLauncher } from './fakeLoginBrowser.js';
@@ -31,11 +29,8 @@ const offlineFetch: HttpFetch = async () => {
   throw new Error('network is disabled in the signal fixture');
 };
 const logger = createStderrAuthenticationLogger();
-const tokenProvider = createTokenProvider(config, offlineFetch, {
-  homeDirectory,
-  launcher: new FakeLoginBrowserLauncher(new FakeLoginBrowserContext({ cookieSteps: [[]] })),
-  logger,
-});
+const launcher = new FakeLoginBrowserLauncher(new FakeLoginBrowserContext({ cookieSteps: [[]] }));
+const tokenProvider = createTokenProvider(config, offlineFetch, { homeDirectory, launcher, logger });
 
 installProcessShutdownHandlers(() => {
   if (mode === SIGNAL_DURING_LOGIN_FIXTURE_MODES.THROWING_SHUTDOWN) {
@@ -43,10 +38,10 @@ installProcessShutdownHandlers(() => {
   }
 });
 
-const { loginLockPath } = resolveStatePaths(homeDirectory);
-const lockPollHandle = setInterval(() => {
-  if (existsSync(loginLockPath)) {
-    clearInterval(lockPollHandle);
+/* Блокировка берётся до запуска окна, поэтому после launch login.lock уже на диске */
+const launchPollHandle = setInterval(() => {
+  if (launcher.launchCalls.length > 0) {
+    clearInterval(launchPollHandle);
     process.stdout.write(`${FIXTURE_OUTPUT_LINES.WAITING}${OUTPUT_LINE_SEPARATOR}`);
   }
 }, FIXTURE_FILE_POLL_INTERVAL_MILLISECONDS);

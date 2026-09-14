@@ -6,6 +6,8 @@ import { Channel, Post, User, UserProfile } from '../types.js';
 import { findRelevantPosts, createNotificationMessage } from './analyzer.js';
 import { Scheduler } from './scheduler.js';
 
+export const MONITORING_RUN_SKIPPED_MESSAGE = 'monitoring run skipped';
+
 const authenticationLogger = createStderrAuthenticationLogger();
 
 /**
@@ -148,6 +150,9 @@ export class TopicMonitor {
                 this.currentUsername = userProfile.username;
                 console.error(`Found username for post author: ${this.currentUsername}`);
               } catch (profileError) {
+                if (profileError instanceof MattermostAuthenticationError) {
+                  throw profileError;
+                }
                 console.error('Error getting user profile:', profileError);
                 this.currentUsername = 'user';
               }
@@ -211,6 +216,9 @@ export class TopicMonitor {
           console.error(`Created direct message channel: ${dmChannel.id}`);
           return;
         } catch (createError) {
+          if (createError instanceof MattermostAuthenticationError) {
+            throw createError;
+          }
           console.error('Error creating direct message channel:', createError);
         }
         
@@ -223,6 +231,9 @@ export class TopicMonitor {
           }
         }
       } catch (innerError) {
+        if (innerError instanceof MattermostAuthenticationError) {
+          throw innerError;
+        }
         console.error('Error finding/creating DM channel:', innerError);
       }
 
@@ -295,7 +306,7 @@ export class TopicMonitor {
       }
     } catch (error) {
       if (error instanceof MattermostAuthenticationError) {
-        authenticationLogger(`monitoring run skipped: ${error.code}`);
+        authenticationLogger(`${MONITORING_RUN_SKIPPED_MESSAGE}: ${error.code}`);
         throw error;
       }
       console.error('Error in monitorChannels:', error);
@@ -386,6 +397,9 @@ export class TopicMonitor {
         console.error(`Sent notification for channel: ${channelName}`);
       }
     } catch (error) {
+      if (error instanceof MattermostAuthenticationError) {
+        throw error;
+      }
       console.error(`Error processing channel ${channelName}:`, error);
     }
   }

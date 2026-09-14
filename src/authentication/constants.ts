@@ -49,6 +49,7 @@ export const AUTHENTICATION_ERROR_CODES = {
   BROWSER_SYSTEM_DEPENDENCIES_MISSING: 'BROWSER_SYSTEM_DEPENDENCIES_MISSING',
   STATE_DIRECTORY_UNSAFE: 'STATE_DIRECTORY_UNSAFE',
   UNAUTHORIZED_AFTER_RETRY: 'UNAUTHORIZED_AFTER_RETRY',
+  REQUEST_CANCELLED: 'REQUEST_CANCELLED',
 } as const;
 
 export const FILE_SYSTEM_ERROR_CODES = {
@@ -64,6 +65,8 @@ export const PROCESS_EXIT_EVENT = 'exit';
 export const ABORT_EVENT = 'abort';
 export const SHUTDOWN_SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP'] as const;
 export const PROGRESS_NOTIFICATION_METHOD = 'notifications/progress';
+export const AUTHENTICATION_MODE_LOG_PREFIX = 'Auth mode:';
+export const SERVER_SHUTDOWN_MESSAGE = 'Shutting down Mattermost MCP Server...';
 
 export const SERVER_PACKAGE_NAME = '@conarti/mattermost-mcp';
 export const PLAYWRIGHT_NPX_PACKAGE = `playwright@${PINNED_PLAYWRIGHT_VERSION}`;
