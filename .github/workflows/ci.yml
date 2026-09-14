@@ -1,0 +1,33 @@
+name: CI
+
+# Прогон на каждый push и на каждый pull request: сборка пакета публичная,
+# поэтому проверка не ждёт merge, а закрывает ветку до него.
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      # npm ci, а не npm install: lock-файл источник истины, состав зависимостей
+      # в CI обязан совпадать с локальным до патч-версии. Chromium при этом не
+      # скачивается: у playwright нет install-скрипта, браузер ставится лениво,
+      # на первом браузерном входе.
+      - run: npm ci
+      # Сборка до тестов: она проверяет, что публикуемый build собирается тем же
+      # tsconfig, которым пользуется релизный workflow.
+      - run: npm run build
+      # Живой Mattermost и настоящий Chromium в CI не участвуют: браузерный вход,
+      # установщик Chromium и HTTP клиент проверяются на фейках и дочерних процессах
+      # из test/fixtures, сеть наружу тестам не нужна.
+      - run: npm test
+      # Проверка поставки: настоящий тарбол, чистая установка, tools/list по stdio.
+      # Только она ловит потерянный shebang, забытый файл в files и
+      # незарегистрированный инструмент, поэтому идёт в CI, а не остаётся ручным шагом.
+      - run: npm run verify:package
