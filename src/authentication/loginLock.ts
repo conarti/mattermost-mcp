@@ -11,6 +11,11 @@
  * и rename, перезапишет запись процесса, который успел снять блокировку. В этих случаях два процесса
  * могут считать себя держателями, и последней защитой от второго входа остаётся singleton-блокировка
  * профиля Chromium.
+ *
+ * Запись login.lock из будущего не считается брошенной: у мёртвого держателя её снимает проверка PID, а у живого
+ * такое правило после скачка часов назад отобрало бы блокировку. login.lock.break из будущего дальше порога
+ * считается брошенной: её держат миллисекунды, а без правила упавший держатель заблокировал бы вход, пока часы
+ * не догонят её время.
  */
 import { randomUUID } from 'node:crypto';
 import { linkSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
@@ -49,7 +54,12 @@ export type LoginLockState =
   | { kind: 'stale'; rawContent: string; reason: string }
   | { kind: 'breaking' };
 
-export type LockRaceStage = 'before-link' | 'before-break-verification' | 'after-stale-unlink';
+export type LockRaceStage =
+  | 'before-link'
+  | 'after-link'
+  | 'before-break-verification'
+  | 'after-stale-unlink'
+  | 'before-renew-rename';
 
 export interface LoginLockOptions {
   paths: StatePaths;
@@ -67,9 +77,12 @@ export interface LoginLockOptions {
 interface LockOwnership {
   record: LoginLockRecord;
   exitHandler: () => void;
+  released: boolean;
 }
 
 const MILLISECONDS_IN_SECOND = 1_000;
+/* process.kill принимает только 32-битный PID со знаком, на большем он бросает не ESRCH, и процесс выглядел бы живым */
+const MAXIMUM_PROCESS_ID = 0x7fffffff;
 
 /* Набор общий для всех экземпляров в процессе, иначе чужой экземпляр счёл бы живую свою запись брошенной */
 const ownedLockNonces = new Set<string>();
@@ -100,8 +113,9 @@ function parseRecord(rawContent: string): LoginLockRecord | undefined {
   const { processId, createdAtMilliseconds, nonce } = parsedContent as Record<string, unknown>;
   if (
     typeof processId !== 'number' ||
-    !Number.isSafeInteger(processId) ||
+    !Number.isInteger(processId) ||
     processId <= 0 ||
+    processId > MAXIMUM_PROCESS_ID ||
     typeof createdAtMilliseconds !== 'number' ||
     !Number.isFinite(createdAtMilliseconds) ||
     typeof nonce !== 'string' ||
@@ -207,11 +221,7 @@ export class LoginLock {
   async tryAcquire(): Promise<HeldLoginLock | undefined> {
     await ensureStateDirectory(this.paths);
     await this.raceHook?.('before-link');
-    const record = this.createRecord();
-    if (!(await writeRecordExclusively(this.paths.loginLockPath, record))) {
-      return undefined;
-    }
-    return this.takeOwnership(record);
+    return this.publishOwnedLockRecord();
   }
 
   async tryBreakStale(state: Extract<LoginLockState, { kind: 'stale' }>): Promise<HeldLoginLock | undefined> {
@@ -231,12 +241,8 @@ export class LoginLock {
       }
       this.logger(`stale login lock removed (${state.reason})`);
       await this.raceHook?.('after-stale-unlink');
-      const record = this.createRecord();
       /* Если файл уже есть, его успел создать обычный захват, и тот процесс единственный владелец */
-      if (!(await writeRecordExclusively(this.paths.loginLockPath, record))) {
-        return undefined;
-      }
-      return this.takeOwnership(record);
+      return await this.publishOwnedLockRecord();
     } finally {
       await this.removeOwnLockBreak(serializeRecord(lockBreakRecord));
     }
@@ -244,6 +250,28 @@ export class LoginLock {
 
   private createRecord(): LoginLockRecord {
     return { processId: process.pid, createdAtMilliseconds: this.clock.now(), nonce: randomUUID() };
+  }
+
+  /**
+   * Публикует свою запись login.lock. Nonce попадает в набор до link: иначе другой экземпляр в этом процессе
+   * между link и регистрацией увидит свой PID с неизвестным nonce и снимет живую запись как брошенную
+   */
+  private async publishOwnedLockRecord(): Promise<HeldLoginLock | undefined> {
+    const record = this.createRecord();
+    ownedLockNonces.add(record.nonce);
+    let published = false;
+    try {
+      published = await writeRecordExclusively(this.paths.loginLockPath, record);
+    } finally {
+      if (!published) {
+        ownedLockNonces.delete(record.nonce);
+      }
+    }
+    if (!published) {
+      return undefined;
+    }
+    await this.raceHook?.('after-link');
+    return this.takeOwnership(record);
   }
 
   private describeStaleness(record: LoginLockRecord): string | undefined {
@@ -262,9 +290,13 @@ export class LoginLock {
 
   private isLockBreakStale(rawContent: string): boolean {
     const record = parseRecord(rawContent);
+    if (record === undefined) {
+      return true;
+    }
+    const ageMilliseconds = this.clock.now() - record.createdAtMilliseconds;
     return (
-      record === undefined ||
-      this.clock.now() - record.createdAtMilliseconds > this.timings.lockBreakStaleAgeMilliseconds
+      ageMilliseconds > this.timings.lockBreakStaleAgeMilliseconds ||
+      ageMilliseconds < -this.timings.lockBreakStaleAgeMilliseconds
     );
   }
 
@@ -298,7 +330,7 @@ export class LoginLock {
    * @returns сырое содержимое своей записи или undefined, если срок истёк
    */
   private async acquireLockBreak(deadlineMilliseconds: number): Promise<string | undefined> {
-    while (true) {
+    while (this.clock.now() < deadlineMilliseconds) {
       const lockBreakRecord = this.createRecord();
       if (await writeRecordExclusively(this.paths.loginLockBreakPath, lockBreakRecord)) {
         return serializeRecord(lockBreakRecord);
@@ -310,19 +342,18 @@ export class LoginLock {
       if (this.isLockBreakStale(existingRawContent) && (await this.removeStaleLockBreak(existingRawContent))) {
         continue;
       }
-      if (this.clock.now() >= deadlineMilliseconds) {
-        return undefined;
-      }
       await this.clock.sleep(this.timings.lockPollIntervalMilliseconds);
     }
+    return undefined;
   }
 
+  /** Nonce записи уже зарегистрирован в publishOwnedLockRecord */
   private takeOwnership(record: LoginLockRecord): HeldLoginLock {
     const ownership: LockOwnership = {
       record,
       exitHandler: () => this.releaseOnExit(ownership),
+      released: false,
     };
-    ownedLockNonces.add(record.nonce);
     process.on(PROCESS_EXIT_EVENT, ownership.exitHandler);
     return {
       get record() {
@@ -334,6 +365,7 @@ export class LoginLock {
   }
 
   private async release(ownership: LockOwnership): Promise<void> {
+    ownership.released = true;
     const deadlineMilliseconds = this.clock.now() + this.timings.lockReleaseTimeoutMilliseconds;
     let lockBreakRawContent: string | undefined;
     try {
@@ -362,6 +394,10 @@ export class LoginLock {
    * поэтому обновление видно ему либо до сверки, либо после снятия, когда nonce уже чужой
    */
   private async renew(ownership: LockOwnership): Promise<LoginLockRenewalResult> {
+    /* release() мог оставить запись при занятой вспомогательной блокировке, и обновление оживило бы её */
+    if (ownership.released) {
+      return 'lost';
+    }
     const deadlineMilliseconds = this.clock.now() + this.timings.lockReleaseTimeoutMilliseconds;
     let lockBreakRawContent: string | undefined;
     let temporaryPath: string | undefined;
@@ -372,7 +408,11 @@ export class LoginLock {
         return 'busy';
       }
       const lockRawContent = await readOptionalFile(this.paths.loginLockPath);
-      if (lockRawContent === undefined || parseRecord(lockRawContent)?.nonce !== ownership.record.nonce) {
+      if (
+        ownership.released ||
+        lockRawContent === undefined ||
+        parseRecord(lockRawContent)?.nonce !== ownership.record.nonce
+      ) {
         return 'lost';
       }
       const renewedRecord: LoginLockRecord = { ...ownership.record, createdAtMilliseconds: this.clock.now() };
@@ -381,6 +421,7 @@ export class LoginLock {
         flag: EXCLUSIVE_CREATE_FLAG,
         mode: PRIVATE_FILE_MODE,
       });
+      await this.raceHook?.('before-renew-rename');
       await rename(temporaryPath, this.paths.loginLockPath);
       ownership.record = renewedRecord;
       return 'renewed';
@@ -423,7 +464,9 @@ export class LoginLock {
       } finally {
         try {
           unlinkSync(temporaryPath);
-        } catch {}
+        } catch {
+          /* Временный файл мог не создаться, и процесс всё равно завершается */
+        }
       }
       if (!ownsLockBreak) {
         return;
@@ -432,10 +475,16 @@ export class LoginLock {
         if (parseRecord(readFileSync(loginLockPath, TEXT_FILE_ENCODING))?.nonce === ownership.record.nonce) {
           unlinkSync(loginLockPath);
         }
-      } catch {}
+      } catch {
+        /* Записи или папки уже нет: снимать нечего, а запись с мёртвым PID другие процессы снимут сами */
+      }
       try {
         unlinkSync(loginLockBreakPath);
-      } catch {}
-    } catch {}
+      } catch {
+        /* Вспомогательная блокировка без живого владельца снимется по возрасту */
+      }
+    } catch {
+      /* Обработчик exit не должен бросать, иначе Node не вызовет следующие обработчики */
+    }
   }
 }

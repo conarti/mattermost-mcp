@@ -11,6 +11,8 @@ import {
   DEFAULT_AUTHENTICATION_TIMINGS,
   PRIVATE_DIRECTORY_MODE,
   PRIVATE_FILE_MODE,
+  PROCESS_EXIT_EVENT,
+  TEMPORARY_FILE_EXTENSION,
   TEXT_FILE_ENCODING,
 } from '../../src/authentication/constants.js';
 import {
@@ -25,13 +27,27 @@ import {
 import { systemClock } from '../../src/authentication/runtime.js';
 import { StatePaths, resolveStatePaths } from '../../src/authentication/stateFiles.js';
 import { FakeClock } from '../fixtures/fakeClock.js';
+import {
+  CHILD_PROCESS_CLOSE_EVENT,
+  EXIT_HANDLER_FIXTURE_MODES,
+  FIXTURE_FILE_NAMES,
+  FIXTURE_KILL_SIGNAL,
+  FIXTURE_OUTPUT_LINES,
+  FIXTURE_TERMINATION_SIGNAL,
+  LOCK_HOLDER_FIXTURE_MODES,
+  OUTPUT_LINE_SEPARATOR,
+  PERMISSION_BITS_MASK,
+  STREAM_DATA_EVENT,
+} from '../fixtures/fixtureConstants.js';
 
 const START_MILLISECONDS = 1_000_000_000_000;
 const LIVE_FOREIGN_PROCESS_ID = 424242;
 const DEAD_PROCESS_ID = 424243;
-const PERMISSION_BITS_MASK = 0o777;
+const MAXIMUM_VALID_PROCESS_ID = 2 ** 31 - 1;
+const FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS = 5_000;
 const CHILD_PROCESS_TEST_TIMEOUT_MILLISECONDS = 30_000;
 const SIGNAL_EXIT_DEADLINE_MILLISECONDS = 2_000;
+const RENEW_TEMPORARY_FILE_SUFFIX = `.renew${TEMPORARY_FILE_EXTENSION}`;
 
 const temporaryDirectories: string[] = [];
 const fixtureProcesses: Array<ChildProcessByStdio<null, Readable, Readable>> = [];
@@ -39,7 +55,7 @@ const fixtureProcesses: Array<ChildProcessByStdio<null, Readable, Readable>> = [
 after(async () => {
   for (const child of fixtureProcesses) {
     if (child.exitCode === null && child.signalCode === null) {
-      child.kill('SIGKILL');
+      child.kill(FIXTURE_KILL_SIGNAL);
     }
   }
   await Promise.all(temporaryDirectories.map((directory) => rm(directory, { recursive: true, force: true })));
@@ -100,6 +116,10 @@ async function pathExists(filePath: string): Promise<boolean> {
   );
 }
 
+async function listRenewTemporaryFiles(directory: string): Promise<string[]> {
+  return (await readdir(directory)).filter((entry) => entry.endsWith(RENEW_TEMPORARY_FILE_SUFFIX));
+}
+
 async function acquireOrFail(lock: LoginLock): Promise<HeldLoginLock> {
   const heldLock = await lock.tryAcquire();
   assert.ok(heldLock, 'expected to acquire the login lock');
@@ -119,7 +139,7 @@ test('fake process ids differ from the test process id', () => {
   assert.notEqual(process.pid, DEAD_PROCESS_ID);
 });
 
-test('L1: record content and exclusive acquisition', async () => {
+test('L1: record content and exclusive acquisition', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
   const context = await createLockTestContext();
   const firstLock = context.createLock();
   const heldLock = await acquireOrFail(firstLock);
@@ -139,13 +159,16 @@ test('L1: record content and exclusive acquisition', async () => {
   await heldLock.release();
 });
 
-test('L2: release removes own lock and keeps a foreign record', async () => {
+test('L2: release removes own lock and keeps a foreign record', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
   const context = await createLockTestContext();
   const lock = context.createLock();
+  const exitListenerCountBeforeAcquisition = process.listenerCount(PROCESS_EXIT_EVENT);
 
   const firstHeldLock = await acquireOrFail(lock);
+  assert.equal(process.listenerCount(PROCESS_EXIT_EVENT), exitListenerCountBeforeAcquisition + 1);
   await firstHeldLock.release();
   assert.equal(await pathExists(context.paths.loginLockPath), false);
+  assert.equal(process.listenerCount(PROCESS_EXIT_EVENT), exitListenerCountBeforeAcquisition);
 
   const secondHeldLock = await acquireOrFail(lock);
   const foreignContent = createRecordContent(LIVE_FOREIGN_PROCESS_ID, context.clock.now(), 'foreign-holder-nonce');
@@ -154,9 +177,33 @@ test('L2: release removes own lock and keeps a foreign record', async () => {
 
   assert.equal(await readFile(context.paths.loginLockPath, TEXT_FILE_ENCODING), foreignContent);
   assert.equal(await pathExists(context.paths.loginLockBreakPath), false);
+  assert.equal(process.listenerCount(PROCESS_EXIT_EVENT), exitListenerCountBeforeAcquisition);
 });
 
-test('L3: inspect reports every stale reason and live records of other instances', async () => {
+test('L2: release resolves without waiting when the state directory was removed', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
+  const context = await createLockTestContext();
+  const exitListenerCountBeforeAcquisition = process.listenerCount(PROCESS_EXIT_EVENT);
+  const heldLock = await acquireOrFail(context.createLock());
+  assert.equal(process.listenerCount(PROCESS_EXIT_EVENT), exitListenerCountBeforeAcquisition + 1);
+  await rm(context.paths.stateDirectory, { recursive: true, force: true });
+
+  await heldLock.release();
+
+  const failureMessage = 'login lock release failed (ENOENT)';
+  assert.equal(context.messages.filter((message) => message === failureMessage).length, 1);
+  assert.equal(context.clock.pendingSleepCount(), 0);
+  assert.equal(process.listenerCount(PROCESS_EXIT_EVENT), exitListenerCountBeforeAcquisition);
+
+  const releasedRecordContent = createRecordContent(process.pid, context.clock.now(), heldLock.record.nonce);
+  await writeRawFile(context.paths.loginLockPath, releasedRecordContent);
+  assert.deepEqual(await context.createLock().inspect(), {
+    kind: 'stale',
+    rawContent: releasedRecordContent,
+    reason: 'own process with unknown nonce',
+  });
+});
+
+test('L3: inspect reports every stale reason and live records of other instances', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
   const context = await createLockTestContext();
   const now = context.clock.now();
   const staleCases = [
@@ -170,6 +217,10 @@ test('L3: inspect reports every stale reason and live records of other instances
     },
     {
       content: 'not a login lock record',
+      reason: 'unreadable record',
+    },
+    {
+      content: createRecordContent(MAXIMUM_VALID_PROCESS_ID + 1, now),
       reason: 'unreadable record',
     },
     {
@@ -187,13 +238,22 @@ test('L3: inspect reports every stale reason and live records of other instances
     });
   }
 
+  const liveForeignRecords: LoginLockRecord[] = [
+    { processId: LIVE_FOREIGN_PROCESS_ID, createdAtMilliseconds: now + 3_600_000, nonce: 'future-foreign-nonce' },
+    { processId: MAXIMUM_VALID_PROCESS_ID, createdAtMilliseconds: now, nonce: 'maximum-process-id-nonce' },
+  ];
+  for (const liveForeignRecord of liveForeignRecords) {
+    await writeRawFile(context.paths.loginLockPath, JSON.stringify(liveForeignRecord));
+    assert.deepEqual(await context.createLock().inspect(), { kind: 'live', record: liveForeignRecord });
+  }
+
   await unlink(context.paths.loginLockPath);
   const heldLock = await acquireOrFail(context.createLock());
   assert.deepEqual(await context.createLock().inspect(), { kind: 'live', record: heldLock.record });
   await heldLock.release();
 });
 
-test('L4: tryBreakStale takes a lock of a dead process', async () => {
+test('L4: tryBreakStale takes a lock of a dead process', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
   const context = await createLockTestContext();
   await writeRawFile(context.paths.loginLockPath, createRecordContent(DEAD_PROCESS_ID, context.clock.now()));
   const lock = context.createLock();
@@ -207,7 +267,7 @@ test('L4: tryBreakStale takes a lock of a dead process', async () => {
   await heldLock.release();
 });
 
-test('L5: lock removed before break verification gives no ownership', async () => {
+test('L5: lock removed before break verification gives no ownership', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
   const context = await createLockTestContext();
   await writeRawFile(context.paths.loginLockPath, createRecordContent(DEAD_PROCESS_ID, context.clock.now()));
   const lock = context.createLock({
@@ -223,7 +283,7 @@ test('L5: lock removed before break verification gives no ownership', async () =
   assert.equal(await pathExists(context.paths.loginLockBreakPath), false);
 });
 
-test('L6: lock replaced by a fresh foreign record before break verification stays intact', async () => {
+test('L6: lock replaced by a fresh foreign record before break verification stays intact', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
   const context = await createLockTestContext();
   await writeRawFile(context.paths.loginLockPath, createRecordContent(DEAD_PROCESS_ID, context.clock.now()));
   const foreignContent = createRecordContent(LIVE_FOREIGN_PROCESS_ID, context.clock.now());
@@ -240,7 +300,7 @@ test('L6: lock replaced by a fresh foreign record before break verification stay
   assert.equal(await pathExists(context.paths.loginLockBreakPath), false);
 });
 
-test('L7: regular acquisition after stale unlink keeps a single owner', async () => {
+test('L7: regular acquisition after stale unlink keeps a single owner', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
   const context = await createLockTestContext();
   await writeRawFile(context.paths.loginLockPath, createRecordContent(DEAD_PROCESS_ID, context.clock.now()));
   const otherLock = context.createLock();
@@ -261,7 +321,7 @@ test('L7: regular acquisition after stale unlink keeps a single owner', async ()
   await otherHeldLock.release();
 });
 
-test('L8: another instance sees breaking while a stale lock is being replaced', async () => {
+test('L8: another instance sees breaking while a stale lock is being replaced', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
   const context = await createLockTestContext();
   await writeRawFile(context.paths.loginLockPath, createRecordContent(DEAD_PROCESS_ID, context.clock.now()));
   const otherLock = context.createLock();
@@ -281,7 +341,7 @@ test('L8: another instance sees breaking while a stale lock is being replaced', 
   await heldLock.release();
 });
 
-test('L9: fresh lock break reports breaking and is removed once its record is stale', async () => {
+test('L9: fresh lock break reports breaking and is removed once its record is stale', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
   const context = await createLockTestContext();
   const liveRecord: LoginLockRecord = {
     processId: LIVE_FOREIGN_PROCESS_ID,
@@ -301,7 +361,7 @@ test('L9: fresh lock break reports breaking and is removed once its record is st
   assert.equal(await pathExists(context.paths.loginLockBreakPath), false);
 });
 
-test('L10: unreadable lock break is removed on the first inspect', async () => {
+test('L10: unreadable lock break is removed on the first inspect', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
   const context = await createLockTestContext();
   await writeRawFile(context.paths.loginLockBreakPath, 'not a lock break record');
 
@@ -310,7 +370,25 @@ test('L10: unreadable lock break is removed on the first inspect', async () => {
   assert.equal(await pathExists(context.paths.loginLockBreakPath), false);
 });
 
-test('L11: four instances breaking one stale lock produce exactly one owner in 20 repetitions', async () => {
+test('L10: lock break created in the future beyond its stale age is removed', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
+  const context = await createLockTestContext();
+  const lock = context.createLock();
+  await writeRawFile(
+    context.paths.loginLockBreakPath,
+    createRecordContent(LIVE_FOREIGN_PROCESS_ID, context.clock.now() + 10_000),
+  );
+  assert.deepEqual(await lock.inspect(), { kind: 'breaking' });
+
+  await writeFile(
+    context.paths.loginLockBreakPath,
+    createRecordContent(LIVE_FOREIGN_PROCESS_ID, context.clock.now() + 11_000),
+  );
+  assert.deepEqual(await lock.inspect(), { kind: 'vacant' });
+  assert.ok(context.messages.includes('stale lock break file removed'));
+  assert.equal(await pathExists(context.paths.loginLockBreakPath), false);
+});
+
+test('L11: four instances breaking one stale lock produce exactly one owner in 20 repetitions', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
   for (let repetition = 0; repetition < 20; repetition += 1) {
     const context = await createLockTestContext();
     await writeRawFile(context.paths.loginLockPath, createRecordContent(DEAD_PROCESS_ID, context.clock.now()));
@@ -368,7 +446,7 @@ test('L11: four instances breaking one stale lock produce exactly one owner in 2
   }
 });
 
-test('L12: release waits for a fresh foreign lock break', async () => {
+test('L12: release waits for a fresh foreign lock break', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
   const context = await createLockTestContext();
   const heldLock = await acquireOrFail(context.createLock());
   await writeRawFile(context.paths.loginLockBreakPath, createRecordContent(LIVE_FOREIGN_PROCESS_ID, context.clock.now()));
@@ -387,7 +465,7 @@ test('L12: release waits for a fresh foreign lock break', async () => {
   assert.equal(await pathExists(context.paths.loginLockBreakPath), false);
 });
 
-test('L12: release gives up after its timeout while the lock break stays busy', async () => {
+test('L12: release gives up after its timeout while the lock break stays busy', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
   const context = await createLockTestContext();
   const lock = context.createLock({
     timings: { ...DEFAULT_AUTHENTICATION_TIMINGS, lockReleaseTimeoutMilliseconds: 5_000 },
@@ -404,17 +482,6 @@ test('L12: release gives up after its timeout while the lock break stays busy', 
   assert.ok(context.messages.includes('login lock release skipped, lock break busy'));
   assert.deepEqual(await readRecordFile(context.paths.loginLockPath), heldLock.record);
   assert.equal(await readFile(context.paths.loginLockBreakPath, TEXT_FILE_ENCODING), foreignLockBreakContent);
-});
-
-test('L12: release resolves without waiting when the state directory was removed', async () => {
-  const context = await createLockTestContext();
-  const heldLock = await acquireOrFail(context.createLock());
-  await rm(context.paths.stateDirectory, { recursive: true, force: true });
-
-  await heldLock.release();
-
-  assert.ok(context.messages.includes('login lock release failed (ENOENT)'));
-  assert.equal(context.clock.pendingSleepCount(), 0);
 });
 
 type FixtureChildProcess = ChildProcessByStdio<null, Readable, Readable>;
@@ -435,27 +502,27 @@ function startFixtureProcess(fixtureFileName: string, fixtureArguments: string[]
   const outputListeners = new Set<() => void>();
   child.stdout.setEncoding(TEXT_FILE_ENCODING);
   child.stderr.setEncoding(TEXT_FILE_ENCODING);
-  child.stdout.on('data', (chunk: string) => {
+  child.stdout.on(STREAM_DATA_EVENT, (chunk: string) => {
     standardOutput += chunk;
     for (const listener of outputListeners) {
       listener();
     }
   });
-  child.stderr.on('data', (chunk: string) => {
+  child.stderr.on(STREAM_DATA_EVENT, (chunk: string) => {
     standardError += chunk;
   });
 
   const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
-    child.once('exit', (code, signal) => resolve({ code, signal }));
+    child.once(PROCESS_EXIT_EVENT, (code, signal) => resolve({ code, signal }));
   });
   const closed = new Promise<void>((resolve) => {
-    child.once('close', () => resolve());
+    child.once(CHILD_PROCESS_CLOSE_EVENT, () => resolve());
   });
 
   const waitForOutputLine = (line: string) =>
     new Promise<void>((resolve, reject) => {
       const checkOutput = () => {
-        if (standardOutput.split('\n').includes(line)) {
+        if (standardOutput.split(OUTPUT_LINE_SEPARATOR).includes(line)) {
           outputListeners.delete(checkOutput);
           resolve();
         }
@@ -483,7 +550,7 @@ async function waitWithDeadline<T>(promise: Promise<T>, deadlineMilliseconds: nu
 test('L13: exit handler of a lock holder process removes the lock', { timeout: CHILD_PROCESS_TEST_TIMEOUT_MILLISECONDS }, async () => {
   const homeDirectory = await createTemporaryHome();
   const paths = resolveStatePaths(homeDirectory);
-  const fixture = startFixtureProcess('lockHolderProcess.js', [homeDirectory, 'exit']);
+  const fixture = startFixtureProcess(FIXTURE_FILE_NAMES.LOCK_HOLDER, [homeDirectory, LOCK_HOLDER_FIXTURE_MODES.EXIT]);
 
   const { code } = await fixture.exited;
   assert.equal(code, 0);
@@ -494,15 +561,15 @@ test('L13: exit handler of a lock holder process removes the lock', { timeout: C
 test('L14: lock of a killed holder process is stale and can be taken', { timeout: CHILD_PROCESS_TEST_TIMEOUT_MILLISECONDS }, async () => {
   const homeDirectory = await createTemporaryHome();
   const paths = resolveStatePaths(homeDirectory);
-  const fixture = startFixtureProcess('lockHolderProcess.js', [homeDirectory, 'hang']);
-  await fixture.waitForOutputLine('acquired');
+  const fixture = startFixtureProcess(FIXTURE_FILE_NAMES.LOCK_HOLDER, [homeDirectory, LOCK_HOLDER_FIXTURE_MODES.HANG]);
+  await fixture.waitForOutputLine(FIXTURE_OUTPUT_LINES.ACQUIRED);
   assert.equal(await pathExists(paths.loginLockPath), true);
 
   const childProcessId = fixture.child.pid;
   assert.ok(childProcessId !== undefined);
-  fixture.child.kill('SIGKILL');
+  fixture.child.kill(FIXTURE_KILL_SIGNAL);
   const { signal } = await waitWithDeadline(fixture.exited, SIGNAL_EXIT_DEADLINE_MILLISECONDS, 'fixture exit');
-  assert.equal(signal, 'SIGKILL');
+  assert.equal(signal, FIXTURE_KILL_SIGNAL);
 
   assert.equal(await pathExists(paths.loginLockPath), true);
   assert.equal(isProcessAlive(childProcessId), false);
@@ -525,11 +592,15 @@ test('L15: exit handler survives a removed state directory on SIGTERM', { timeou
   const homeDirectory = join(temporaryDirectory, 'home');
   const markerPath = join(temporaryDirectory, 'marker');
   const paths = resolveStatePaths(homeDirectory);
-  const fixture = startFixtureProcess('exitHandlerProcess.js', [homeDirectory, markerPath, 'remove-state-directory']);
-  await fixture.waitForOutputLine('ready');
+  const fixture = startFixtureProcess(FIXTURE_FILE_NAMES.EXIT_HANDLER, [
+    homeDirectory,
+    markerPath,
+    EXIT_HANDLER_FIXTURE_MODES.REMOVE_STATE_DIRECTORY,
+  ]);
+  await fixture.waitForOutputLine(FIXTURE_OUTPUT_LINES.READY);
 
   await rm(paths.stateDirectory, { recursive: true, force: true });
-  fixture.child.kill('SIGTERM');
+  fixture.child.kill(FIXTURE_TERMINATION_SIGNAL);
   const { code, signal } = await waitWithDeadline(fixture.exited, SIGNAL_EXIT_DEADLINE_MILLISECONDS, 'fixture exit');
 
   assert.equal(code, 0);
@@ -542,7 +613,11 @@ test('L16: exit handler survives a removed lock file', { timeout: CHILD_PROCESS_
   const homeDirectory = join(temporaryDirectory, 'home');
   const markerPath = join(temporaryDirectory, 'marker');
   const paths = resolveStatePaths(homeDirectory);
-  const fixture = startFixtureProcess('exitHandlerProcess.js', [homeDirectory, markerPath, 'remove-lock-file']);
+  const fixture = startFixtureProcess(FIXTURE_FILE_NAMES.EXIT_HANDLER, [
+    homeDirectory,
+    markerPath,
+    EXIT_HANDLER_FIXTURE_MODES.REMOVE_LOCK_FILE,
+  ]);
 
   const { code } = await fixture.exited;
   assert.equal(code, 0);
@@ -555,7 +630,11 @@ test('L17: exit handler treats a lock break with its own process id as its own',
   const homeDirectory = join(temporaryDirectory, 'home');
   const markerPath = join(temporaryDirectory, 'marker');
   const paths = resolveStatePaths(homeDirectory);
-  const fixture = startFixtureProcess('exitHandlerProcess.js', [homeDirectory, markerPath, 'own-break']);
+  const fixture = startFixtureProcess(FIXTURE_FILE_NAMES.EXIT_HANDLER, [
+    homeDirectory,
+    markerPath,
+    EXIT_HANDLER_FIXTURE_MODES.OWN_BREAK,
+  ]);
 
   const { code } = await fixture.exited;
   assert.equal(code, 0);
@@ -564,7 +643,7 @@ test('L17: exit handler treats a lock break with its own process id as its own',
   assert.equal(await pathExists(paths.loginLockBreakPath), false);
 });
 
-test('L18: renew keeps the lock live beyond the stale age', async () => {
+test('L18: renew keeps the lock live beyond the stale age', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
   const context = await createLockTestContext();
   const heldLock = await acquireOrFail(context.createLock());
   const originalContent = await readFile(context.paths.loginLockPath, TEXT_FILE_ENCODING);
@@ -596,7 +675,7 @@ test('L18: renew keeps the lock live beyond the stale age', async () => {
   assert.equal(await pathExists(context.paths.loginLockPath), false);
 });
 
-test('L19: renew reports lost when a foreign record replaced the lock', async () => {
+test('L19: renew reports lost when a foreign record replaced the lock', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
   const context = await createLockTestContext();
   const heldLock = await acquireOrFail(context.createLock());
   const foreignContent = createRecordContent(LIVE_FOREIGN_PROCESS_ID, context.clock.now());
@@ -610,7 +689,7 @@ test('L19: renew reports lost when a foreign record replaced the lock', async ()
   assert.equal(await readFile(context.paths.loginLockPath, TEXT_FILE_ENCODING), foreignContent);
 });
 
-test('L19: renew does not throw when the state directory was removed', async () => {
+test('L19: renew does not throw when the state directory was removed', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
   const context = await createLockTestContext();
   const heldLock = await acquireOrFail(context.createLock());
   await rm(context.paths.stateDirectory, { recursive: true, force: true });
@@ -624,7 +703,10 @@ test('L19: renew does not throw when the state directory was removed', async () 
 
 test(
   'L19: renew does not throw when the state directory is not writable',
-  { skip: process.getuid?.() === 0 ? 'root ignores directory permissions' : false },
+  {
+    timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS,
+    skip: process.getuid?.() === 0 ? 'root ignores directory permissions' : false,
+  },
   async () => {
     const context = await createLockTestContext();
     const heldLock = await acquireOrFail(context.createLock());
@@ -633,8 +715,6 @@ test(
     try {
       assert.equal(await heldLock.renew(), 'lost');
       assert.ok(context.messages.includes('login lock renewal failed (EACCES)'));
-      const entries = await readdir(context.paths.stateDirectory);
-      assert.deepEqual(entries.filter((entry) => entry.endsWith('.renew.tmp')), []);
       assert.equal(await readFile(context.paths.loginLockPath, TEXT_FILE_ENCODING), originalContent);
     } finally {
       await chmod(context.paths.stateDirectory, PRIVATE_DIRECTORY_MODE);
@@ -644,7 +724,33 @@ test(
   },
 );
 
-test('L20: renew waits for a fresh foreign lock break and renews once it is stale', async () => {
+test('L19: renew removes its temporary file when rename fails', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
+  const context = await createLockTestContext();
+  let renewTemporaryFilesBeforeRename: string[] = [];
+  const lock = context.createLock({
+    raceHook: async (stage) => {
+      if (stage !== 'before-renew-rename') {
+        return;
+      }
+      renewTemporaryFilesBeforeRename = await listRenewTemporaryFiles(context.paths.stateDirectory);
+      /* Папка на месте login.lock ломает rename уже после создания временного файла */
+      await unlink(context.paths.loginLockPath);
+      await mkdir(context.paths.loginLockPath);
+    },
+  });
+  const heldLock = await acquireOrFail(lock);
+
+  assert.equal(await heldLock.renew(), 'lost');
+  assert.equal(renewTemporaryFilesBeforeRename.length, 1);
+  assert.ok(context.messages.includes('login lock renewal failed (EISDIR)'));
+  assert.deepEqual(await listRenewTemporaryFiles(context.paths.stateDirectory), []);
+  assert.equal(await pathExists(context.paths.loginLockBreakPath), false);
+
+  await rm(context.paths.loginLockPath, { recursive: true });
+  await heldLock.release();
+});
+
+test('L20: renew waits for a fresh foreign lock break and renews once it is stale', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
   const context = await createLockTestContext();
   const heldLock = await acquireOrFail(context.createLock());
   const originalNonce = heldLock.record.nonce;
@@ -668,7 +774,7 @@ test('L20: renew waits for a fresh foreign lock break and renews once it is stal
   await heldLock.release();
 });
 
-test('L20: renew reports busy after its timeout while the lock break stays busy', async () => {
+test('L20: renew reports busy after its timeout while the lock break stays busy', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
   const context = await createLockTestContext();
   const lock = context.createLock({
     timings: { ...DEFAULT_AUTHENTICATION_TIMINGS, lockReleaseTimeoutMilliseconds: 5_000 },
@@ -692,7 +798,31 @@ test('L20: renew reports busy after its timeout while the lock break stays busy'
   await heldLock.release();
 });
 
-test('L21: renewal before stale break verification keeps the renewed record', async () => {
+test('L20: renew after a skipped release reports lost without touching the record', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
+  const context = await createLockTestContext();
+  const lock = context.createLock({
+    timings: { ...DEFAULT_AUTHENTICATION_TIMINGS, lockReleaseTimeoutMilliseconds: 5_000 },
+  });
+  const heldLock = await acquireOrFail(lock);
+  await writeRawFile(context.paths.loginLockBreakPath, createRecordContent(LIVE_FOREIGN_PROCESS_ID, context.clock.now()));
+
+  const release = heldLock.release();
+  await context.clock.waitForPendingSleeps(1);
+  context.clock.advance(5_000);
+  await release;
+  assert.ok(context.messages.includes('login lock release skipped, lock break busy'));
+
+  await unlink(context.paths.loginLockBreakPath);
+  const recordContentAfterRelease = await readFile(context.paths.loginLockPath, TEXT_FILE_ENCODING);
+  context.clock.advance(1_000);
+
+  assert.equal(await heldLock.renew(), 'lost');
+  assert.equal(await readFile(context.paths.loginLockPath, TEXT_FILE_ENCODING), recordContentAfterRelease);
+  assert.equal(context.clock.pendingSleepCount(), 0);
+  assert.equal(await pathExists(context.paths.loginLockBreakPath), false);
+});
+
+test('L21: renewal before stale break verification keeps the renewed record', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
   const context = await createLockTestContext();
   const heldLock = await acquireOrFail(context.createLock());
   context.clock.advance(361_000);
@@ -710,7 +840,7 @@ test('L21: renewal before stale break verification keeps the renewed record', as
   await heldLock.release();
 });
 
-test('L21: renewal racing with a stale break loses to the breaker', async () => {
+test('L21: renewal racing with a stale break loses to the breaker', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
   const context = await createLockTestContext();
   const heldLock = await acquireOrFail(context.createLock());
   context.clock.advance(361_000);
@@ -738,4 +868,23 @@ test('L21: renewal racing with a stale break loses to the breaker', async () => 
 
   await heldLock.release();
   await breakerHeldLock.release();
+});
+
+test('L22: another instance in the same process sees a live lock right after link', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
+  const context = await createLockTestContext();
+  const otherLock = context.createLock();
+  let observedState: LoginLockState | undefined;
+  const lock = context.createLock({
+    raceHook: async (stage) => {
+      if (stage === 'after-link') {
+        observedState = await otherLock.inspect();
+      }
+    },
+  });
+
+  const heldLock = await acquireOrFail(lock);
+  assert.deepEqual(observedState, { kind: 'live', record: heldLock.record });
+  assert.deepEqual(await readRecordFile(context.paths.loginLockPath), heldLock.record);
+
+  await heldLock.release();
 });

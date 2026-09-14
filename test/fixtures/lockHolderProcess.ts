@@ -2,6 +2,7 @@ import { DEFAULT_AUTHENTICATION_TIMINGS } from '../../src/authentication/constan
 import { LoginLock } from '../../src/authentication/loginLock.js';
 import { createStderrAuthenticationLogger, systemClock } from '../../src/authentication/runtime.js';
 import { resolveStatePaths } from '../../src/authentication/stateFiles.js';
+import { FIXTURE_OUTPUT_LINES, LOCK_HOLDER_FIXTURE_MODES, OUTPUT_LINE_SEPARATOR } from './fixtureConstants.js';
 
 const [homeDirectory, mode] = process.argv.slice(2);
 
@@ -18,10 +19,11 @@ if (heldLock === undefined) {
   process.exit(1);
 }
 
-if (mode === 'exit') {
-  process.stdout.write('acquired\n', () => process.exit(0));
-} else if (mode === 'hang') {
-  process.stdout.write('acquired\n');
+const acquiredOutput = `${FIXTURE_OUTPUT_LINES.ACQUIRED}${OUTPUT_LINE_SEPARATOR}`;
+if (mode === LOCK_HOLDER_FIXTURE_MODES.EXIT) {
+  process.stdout.write(acquiredOutput, () => process.exit(0));
+} else if (mode === LOCK_HOLDER_FIXTURE_MODES.HANG) {
+  process.stdout.write(acquiredOutput);
   setInterval(() => undefined, 1_000_000);
 } else {
   process.stderr.write(`unknown lock holder fixture mode ${mode}\n`);
