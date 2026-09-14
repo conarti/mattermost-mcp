@@ -1,5 +1,23 @@
 import fetch from 'node-fetch';
-import { loadConfig } from './config.js';
+import { AuthenticationMode, Config, loadConfig } from './config.js';
+import {
+  AUTHENTICATION_ERROR_CODES,
+  AUTHORIZATION_HEADER_NAME,
+  BEARER_TOKEN_PREFIX,
+  CONTENT_TYPE_HEADER_NAME,
+  CURRENT_USER_API_PATH,
+  HTTP_GET_METHOD,
+  HTTP_POST_METHOD,
+  HTTP_STATUS_UNAUTHORIZED,
+  JSON_CONTENT_TYPE,
+} from './authentication/constants.js';
+import { MattermostAuthenticationError, createStderrAuthenticationLogger } from './authentication/runtime.js';
+import {
+  BACKGROUND_CALL_CONTEXT,
+  RequestCallContext,
+  TokenProvider,
+  createTokenProvider,
+} from './authentication/session.js';
 import {
   Channel,
   Post,
@@ -8,60 +26,157 @@ import {
   Reaction,
   PostsResponse,
   ChannelsResponse,
-  UsersResponse
+  UsersResponse,
+  HttpFetch,
+  HttpRequest,
+  HttpResponse
 } from './types.js';
 
+const REQUEST_STILL_UNAUTHORIZED_MESSAGE = 'request still unauthorized after sign-in';
+const UNAUTHORIZED_AFTER_SIGN_IN_STATUS_DESCRIPTION = `${HTTP_STATUS_UNAUTHORIZED} Unauthorized after sign-in`;
+
+const authenticationLogger = createStderrAuthenticationLogger();
+
+const nodeFetchImplementation: HttpFetch = (url, request) =>
+  fetch(url, {
+    method: request.method,
+    headers: request.headers,
+    body: request.body,
+    signal: request.signal,
+  });
+
+export interface MattermostClientDependencies {
+  config?: Config;
+  tokenProvider?: TokenProvider;
+  fetchImplementation?: HttpFetch;
+  callContext?: RequestCallContext;
+}
+
+interface MattermostRequestOptions {
+  method: HttpRequest['method'];
+  url: string;
+  body?: unknown;
+  failureMessage: string;
+  includeResponseBodyInError: boolean;
+  /** Статус ответа и тело ошибки в stderr, как делал getChannels в 1.1.2 */
+  logResponseDiagnostics?: boolean;
+}
+
 export class MattermostClient {
+  private readonly config: Config;
+  private readonly tokenProvider: TokenProvider;
+  private readonly fetchImplementation: HttpFetch;
+  private readonly callContext: RequestCallContext;
   private baseUrl: string;
-  private headers: Record<string, string>;
   private teamId: string;
 
-  constructor() {
-    const config = loadConfig();
-    this.baseUrl = config.mattermostUrl;
-    this.teamId = config.teamId;
-    this.headers = {
-      'Authorization': `Bearer ${config.token}`,
-      'Content-Type': 'application/json'
-    };
+  constructor(dependencies: MattermostClientDependencies = {}) {
+    this.config = dependencies.config ?? loadConfig();
+    this.fetchImplementation = dependencies.fetchImplementation ?? nodeFetchImplementation;
+    this.tokenProvider = dependencies.tokenProvider ?? createTokenProvider(this.config, this.fetchImplementation);
+    this.callContext = dependencies.callContext ?? BACKGROUND_CALL_CONTEXT;
+    this.baseUrl = this.config.mattermostUrl;
+    this.teamId = this.config.teamId;
   }
 
-  // Channel-related methods
+  /** Представление клиента для одного вызова инструмента: общий провайдер токена, свой контекст */
+  withCallContext(callContext: RequestCallContext): MattermostClient {
+    return new MattermostClient({
+      config: this.config,
+      tokenProvider: this.tokenProvider,
+      fetchImplementation: this.fetchImplementation,
+      callContext,
+    });
+  }
+
+  get authenticationMode(): AuthenticationMode {
+    return this.tokenProvider.mode;
+  }
+
+  /** Ровно один повтор после 401: провайдер получает отвергнутый токен, в статическом режиме повтора нет */
+  private async request<ResponseBody>(options: MattermostRequestOptions): Promise<ResponseBody> {
+    const token = await this.tokenProvider.getToken(this.callContext);
+    let response = await this.send(options, token);
+
+    if (response.status === HTTP_STATUS_UNAUTHORIZED) {
+      const recoveredToken = await this.tokenProvider.recoverFromUnauthorized(token, this.callContext);
+      if (recoveredToken === undefined) {
+        throw await this.createFailureError(options, response);
+      }
+      response = await this.send(options, recoveredToken);
+      if (response.status === HTTP_STATUS_UNAUTHORIZED) {
+        authenticationLogger(REQUEST_STILL_UNAUTHORIZED_MESSAGE);
+        throw new MattermostAuthenticationError(
+          AUTHENTICATION_ERROR_CODES.UNAUTHORIZED_AFTER_RETRY,
+          `${options.failureMessage}: ${UNAUTHORIZED_AFTER_SIGN_IN_STATUS_DESCRIPTION}`,
+        );
+      }
+    }
+
+    if (!response.ok) {
+      throw await this.createFailureError(options, response);
+    }
+
+    return (await response.json()) as ResponseBody;
+  }
+
+  private async send(options: MattermostRequestOptions, token: string): Promise<HttpResponse> {
+    const response = await this.fetchImplementation(options.url, {
+      method: options.method,
+      headers: {
+        [AUTHORIZATION_HEADER_NAME]: `${BEARER_TOKEN_PREFIX}${token}`,
+        [CONTENT_TYPE_HEADER_NAME]: JSON_CONTENT_TYPE,
+      },
+      body: options.body === undefined ? undefined : JSON.stringify(options.body),
+    });
+
+    if (options.logResponseDiagnostics) {
+      console.error(`Response status: ${response.status} ${response.statusText}`);
+    }
+
+    return response;
+  }
+
+  private async createFailureError(options: MattermostRequestOptions, response: HttpResponse): Promise<Error> {
+    const failureDescription = `${options.failureMessage}: ${response.status} ${response.statusText}`;
+    if (!options.includeResponseBodyInError) {
+      return new Error(failureDescription);
+    }
+
+    const errorText = await response.text();
+    if (options.logResponseDiagnostics) {
+      console.error(`Error response body: ${errorText}`);
+    }
+    return new Error(`${failureDescription} - ${errorText}`);
+  }
+
   async getChannels(limit: number = 100, page: number = 0): Promise<ChannelsResponse> {
     const url = new URL(`${this.baseUrl}/teams/${this.teamId}/channels`);
     url.searchParams.append('page', page.toString());
     url.searchParams.append('per_page', limit.toString());
-    
+
     console.error(`Fetching channels from URL: ${url.toString()}`);
-    console.error(`Using headers: ${JSON.stringify(this.headers)}`);
-    
+
     try {
-      const response = await fetch(url.toString(), { headers: this.headers });
-      
-      console.error(`Response status: ${response.status} ${response.statusText}`);
-      
-      if (!response.ok) {
-        const errorText = await response.text();
-        console.error(`Error response body: ${errorText}`);
-        throw new Error(`Failed to get channels: ${response.status} ${response.statusText} - ${errorText}`);
-      }
-      
-      // The API returns an array of channels, but our ChannelsResponse type expects an object
-      // with a channels property, so we need to transform the response
-      const channelsArray = await response.json();
-      
+      /* API возвращает массив каналов, а ChannelsResponse ожидает объект со списком */
+      const channelsArray = await this.request<Channel[] | ChannelsResponse>({
+        method: HTTP_GET_METHOD,
+        url: url.toString(),
+        failureMessage: 'Failed to get channels',
+        includeResponseBodyInError: true,
+        logResponseDiagnostics: true,
+      });
+
       console.error(`Response data type: ${typeof channelsArray}, isArray: ${Array.isArray(channelsArray)}`);
-      
-      // Check if the response is an array (as expected from the API)
+
       if (Array.isArray(channelsArray)) {
         return {
           channels: channelsArray,
           total_count: channelsArray.length
         };
       }
-      
-      // If it's already in the expected format, return it as is
-      return channelsArray as ChannelsResponse;
+
+      return channelsArray;
     } catch (error) {
       console.error(`Error fetching channels: ${error instanceof Error ? error.message : String(error)}`);
       throw error;
@@ -69,36 +184,26 @@ export class MattermostClient {
   }
 
   async getChannel(channelId: string): Promise<Channel> {
-    const url = `${this.baseUrl}/channels/${channelId}`;
-    const response = await fetch(url, { headers: this.headers });
-    
-    if (!response.ok) {
-      throw new Error(`Failed to get channel: ${response.status} ${response.statusText}`);
-    }
-    
-    return response.json() as Promise<Channel>;
+    return this.request<Channel>({
+      method: HTTP_GET_METHOD,
+      url: `${this.baseUrl}/channels/${channelId}`,
+      failureMessage: 'Failed to get channel',
+      includeResponseBodyInError: false,
+    });
   }
 
-  // Post-related methods
   async createPost(channelId: string, message: string, rootId?: string): Promise<Post> {
-    const url = `${this.baseUrl}/posts`;
-    const body = {
-      channel_id: channelId,
-      message,
-      root_id: rootId || ''
-    };
-    
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: this.headers,
-      body: JSON.stringify(body)
+    return this.request<Post>({
+      method: HTTP_POST_METHOD,
+      url: `${this.baseUrl}/posts`,
+      body: {
+        channel_id: channelId,
+        message,
+        root_id: rootId || ''
+      },
+      failureMessage: 'Failed to create post',
+      includeResponseBodyInError: false,
     });
-    
-    if (!response.ok) {
-      throw new Error(`Failed to create post: ${response.status} ${response.statusText}`);
-    }
-    
-    return response.json() as Promise<Post>;
   }
 
   async getPostsForChannel(
@@ -106,9 +211,10 @@ export class MattermostClient {
     limit: number = 30,
     page: number = 0,
     options?: {
-      since?: number;      // Unix timestamp in milliseconds
-      before?: string;     // Post ID to get posts before
-      after?: string;      // Post ID to get posts after
+      /** Unix-время в миллисекундах */
+      since?: number;
+      before?: string;
+      after?: string;
     }
   ): Promise<PostsResponse> {
     const url = new URL(`${this.baseUrl}/channels/${channelId}/posts`);
@@ -125,28 +231,28 @@ export class MattermostClient {
       url.searchParams.append('after', options.after);
     }
 
-    const response = await fetch(url.toString(), { headers: this.headers });
-
-    if (!response.ok) {
-      throw new Error(`Failed to get posts: ${response.status} ${response.statusText}`);
-    }
-
-    return response.json() as Promise<PostsResponse>;
+    return this.request<PostsResponse>({
+      method: HTTP_GET_METHOD,
+      url: url.toString(),
+      failureMessage: 'Failed to get posts',
+      includeResponseBodyInError: false,
+    });
   }
 
-  // Get all posts from a channel with auto-pagination
   async getAllPostsForChannel(
     channelId: string,
     options?: {
       since?: number;
       before?: string;
       after?: string;
-      maxPosts?: number;   // Maximum number of posts to fetch (default: no limit)
+      /** По умолчанию без ограничения */
+      maxPosts?: number;
     }
   ): Promise<PostsResponse> {
     const allPosts: Record<string, Post> = {};
     const allOrder: string[] = [];
-    const perPage = 200; // Max per page
+    /* Максимум Mattermost API на одну страницу */
+    const perPage = 200;
     let page = 0;
     let hasMore = true;
     const maxPosts = options?.maxPosts || Infinity;
@@ -163,15 +269,12 @@ export class MattermostClient {
         break;
       }
 
-      // Merge posts
       Object.assign(allPosts, response.posts);
       allOrder.push(...response.order);
 
-      // Check if there are more posts
       hasMore = response.order.length === perPage;
       page++;
 
-      // Respect maxPosts limit
       if (allOrder.length >= maxPosts) {
         break;
       }
@@ -186,62 +289,47 @@ export class MattermostClient {
   }
 
   async getPost(postId: string): Promise<Post> {
-    const url = `${this.baseUrl}/posts/${postId}`;
-    const response = await fetch(url, { headers: this.headers });
-    
-    if (!response.ok) {
-      throw new Error(`Failed to get post: ${response.status} ${response.statusText}`);
-    }
-    
-    return response.json() as Promise<Post>;
+    return this.request<Post>({
+      method: HTTP_GET_METHOD,
+      url: `${this.baseUrl}/posts/${postId}`,
+      failureMessage: 'Failed to get post',
+      includeResponseBodyInError: false,
+    });
   }
 
   async getPostThread(postId: string): Promise<PostsResponse> {
-    const url = `${this.baseUrl}/posts/${postId}/thread`;
-    const response = await fetch(url, { headers: this.headers });
-    
-    if (!response.ok) {
-      throw new Error(`Failed to get post thread: ${response.status} ${response.statusText}`);
-    }
-    
-    return response.json() as Promise<PostsResponse>;
-  }
-
-  // Reaction-related methods
-  async addReaction(postId: string, emojiName: string): Promise<Reaction> {
-    const url = `${this.baseUrl}/reactions`;
-    const body = {
-      post_id: postId,
-      emoji_name: emojiName
-    };
-    
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: this.headers,
-      body: JSON.stringify(body)
+    return this.request<PostsResponse>({
+      method: HTTP_GET_METHOD,
+      url: `${this.baseUrl}/posts/${postId}/thread`,
+      failureMessage: 'Failed to get post thread',
+      includeResponseBodyInError: false,
     });
-    
-    if (!response.ok) {
-      throw new Error(`Failed to add reaction: ${response.status} ${response.statusText}`);
-    }
-    
-    return response.json() as Promise<Reaction>;
   }
 
-  // User-related methods
+  async addReaction(postId: string, emojiName: string): Promise<Reaction> {
+    return this.request<Reaction>({
+      method: HTTP_POST_METHOD,
+      url: `${this.baseUrl}/reactions`,
+      body: {
+        post_id: postId,
+        emoji_name: emojiName
+      },
+      failureMessage: 'Failed to add reaction',
+      includeResponseBodyInError: false,
+    });
+  }
+
   async getUsers(limit: number = 100, page: number = 0): Promise<UsersResponse> {
     const url = new URL(`${this.baseUrl}/users`);
     url.searchParams.append('page', page.toString());
     url.searchParams.append('per_page', limit.toString());
 
-    const response = await fetch(url.toString(), { headers: this.headers });
-
-    if (!response.ok) {
-      throw new Error(`Failed to get users: ${response.status} ${response.statusText}`);
-    }
-
-    // The API returns an array of users directly
-    const usersArray = await response.json();
+    const usersArray = await this.request<User[] | UsersResponse>({
+      method: HTTP_GET_METHOD,
+      url: url.toString(),
+      failureMessage: 'Failed to get users',
+      includeResponseBodyInError: false,
+    });
 
     if (Array.isArray(usersArray)) {
       return {
@@ -250,47 +338,40 @@ export class MattermostClient {
       };
     }
 
-    return usersArray as UsersResponse;
+    return usersArray;
   }
 
   async getUserProfile(userId: string): Promise<UserProfile> {
-    const url = `${this.baseUrl}/users/${userId}`;
-    const response = await fetch(url, { headers: this.headers });
-    
-    if (!response.ok) {
-      throw new Error(`Failed to get user profile: ${response.status} ${response.statusText}`);
-    }
-    
-    return response.json() as Promise<UserProfile>;
+    return this.request<UserProfile>({
+      method: HTTP_GET_METHOD,
+      url: `${this.baseUrl}/users/${userId}`,
+      failureMessage: 'Failed to get user profile',
+      includeResponseBodyInError: false,
+    });
   }
-  
-  // Get current authenticated user
+
   async getMe(): Promise<UserProfile> {
-    const url = `${this.baseUrl}/users/me`;
-    const response = await fetch(url, { headers: this.headers });
-
-    if (!response.ok) {
-      throw new Error(`Failed to get current user: ${response.status} ${response.statusText}`);
-    }
-
-    return response.json() as Promise<UserProfile>;
+    return this.request<UserProfile>({
+      method: HTTP_GET_METHOD,
+      url: `${this.baseUrl}${CURRENT_USER_API_PATH}`,
+      failureMessage: 'Failed to get current user',
+      includeResponseBodyInError: false,
+    });
   }
 
-  // Get channels for current user (includes private channels and DMs)
+  /** Включает приватные каналы и личные сообщения */
   async getMyChannels(limit: number = 100, page: number = 0): Promise<ChannelsResponse> {
-    const url = new URL(`${this.baseUrl}/users/me/channels`);
+    const url = new URL(`${this.baseUrl}${CURRENT_USER_API_PATH}/channels`);
     url.searchParams.append('page', page.toString());
     url.searchParams.append('per_page', limit.toString());
 
     try {
-      const response = await fetch(url.toString(), { headers: this.headers });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Failed to get user channels: ${response.status} ${response.statusText} - ${errorText}`);
-      }
-
-      const channelsArray = await response.json();
+      const channelsArray = await this.request<Channel[] | ChannelsResponse>({
+        method: HTTP_GET_METHOD,
+        url: url.toString(),
+        failureMessage: 'Failed to get user channels',
+        includeResponseBodyInError: true,
+      });
 
       if (Array.isArray(channelsArray)) {
         return {
@@ -299,32 +380,22 @@ export class MattermostClient {
         };
       }
 
-      return channelsArray as ChannelsResponse;
+      return channelsArray;
     } catch (error) {
       console.error(`Error fetching user channels: ${error instanceof Error ? error.message : String(error)}`);
       throw error;
     }
   }
 
-  // Direct message channel methods
   async createDirectMessageChannel(otherUserId: string): Promise<Channel> {
-    // First get current user ID
     const me = await this.getMe();
 
-    const url = `${this.baseUrl}/channels/direct`;
-    const body = [me.id, otherUserId];
-
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: this.headers,
-      body: JSON.stringify(body)
+    return this.request<Channel>({
+      method: HTTP_POST_METHOD,
+      url: `${this.baseUrl}/channels/direct`,
+      body: [me.id, otherUserId],
+      failureMessage: 'Failed to create direct message channel',
+      includeResponseBodyInError: true,
     });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`Failed to create direct message channel: ${response.status} ${response.statusText} - ${errorText}`);
-    }
-
-    return response.json() as Promise<Channel>;
   }
 }

@@ -99,7 +99,10 @@ export const AUTHENTICATION_MODES = {
 } as const;
 export const AUTHORIZATION_HEADER_NAME = 'Authorization';
 export const BEARER_TOKEN_PREFIX = 'Bearer ';
+export const CONTENT_TYPE_HEADER_NAME = 'Content-Type';
+export const JSON_CONTENT_TYPE = 'application/json';
 export const HTTP_GET_METHOD = 'GET';
+export const HTTP_POST_METHOD = 'POST';
 export const HTTP_STATUS_OK = 200;
 export const HTTP_STATUS_UNAUTHORIZED = 401;
 export const UNKNOWN_ERROR_NAME = 'UnknownError';
