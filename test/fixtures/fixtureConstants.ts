@@ -12,6 +12,7 @@ export const FIXTURE_FILE_NAMES = {
   FAKE_PLAYWRIGHT_CLI: 'fakePlaywrightCli.js',
   SIGNAL_DURING_LOGIN: 'signalDuringLoginProcess.js',
   SIGNAL_DURING_INSTALLATION: 'signalDuringInstallationProcess.js',
+  LOGIN_WORKER: 'loginWorkerProcess.js',
 } as const;
 
 export const FIXTURE_OUTPUT_LINES = {
@@ -46,6 +47,36 @@ export const PLAYWRIGHT_CLI_FIXTURE_MODES = {
   FAILURE: 'failure',
   HANG: 'hang',
 } as const;
+
+export const LOGIN_WORKER_SCENARIOS = {
+  SUCCESS: 'success',
+  CLOSE_WINDOW: 'close-window',
+  INSTALL_THEN_SUCCESS: 'install-then-success',
+} as const;
+
+export const LOGIN_WORKER_FILE_NAMES = {
+  WINDOW_LOG: 'windows.log',
+  INSTALLATION_LOG: 'installations.log',
+  BARRIER: 'barrier',
+  BROWSERS_INSTALLED_MARKER: 'fake-browsers-installed',
+} as const;
+
+export const LOGIN_WORKER_LOG_ENTRY_KINDS = {
+  WINDOW: 'window',
+  INSTALL: 'install',
+} as const;
+
+export const LOGIN_WORKER_RESULTS = {
+  OK: 'ok',
+  ERROR: 'error',
+} as const;
+
+export const LOGIN_WORKER_TOKENS = {
+  EXPIRED: 'expired-secret-token-0002',
+  FRESH: 'fresh-secret-token-0003',
+} as const;
+
+export const LOG_ENTRY_FIELD_SEPARATOR = ' ';
 
 export const PLAYWRIGHT_CLI_FIXTURE_VARIABLES = {
   MODE: 'FAKE_PLAYWRIGHT_CLI_MODE',
