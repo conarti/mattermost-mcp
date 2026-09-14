@@ -36,7 +36,9 @@ import {
   PLAYWRIGHT_PACKAGE_JSON_SPECIFIER,
   PRIVATE_DIRECTORY_MODE,
   PROCESS_EXIT_EVENT,
+  PROXY_ENVIRONMENT_VARIABLES,
   REDACTED_URL_CREDENTIALS,
+  REDACTED_USER_INFORMATION,
   SERVER_PACKAGE_NAME,
   SPAWN_SYSTEM_CALL_PATTERN,
   STACK_TRACE_LINE_PATTERN,
@@ -44,6 +46,8 @@ import {
   TEXT_FILE_ENCODING,
   UNKNOWN_ERROR_CODE,
   URL_CREDENTIALS_PATTERN,
+  URL_SCHEME_PREFIX_PATTERN,
+  USER_INFORMATION_SEPARATOR,
   WHITESPACE_RUN_PATTERN,
 } from './constants.js';
 import { buildChromiumInstallCommand } from './browserLogin.js';
@@ -55,6 +59,7 @@ import {
   getErrorFirstLine,
   systemClock,
 } from './runtime.js';
+import { ensurePrivateDirectory } from './stateFiles.js';
 
 export interface BrowserInstallationProgress {
   percent: number;
@@ -97,6 +102,24 @@ export function buildInstallationEnvironment(
 
 export function redactUrlCredentials(text: string): string {
   return text.replace(URL_CREDENTIALS_PATTERN, REDACTED_URL_CREDENTIALS);
+}
+
+/**
+ * Убирает userinfo прокси из окружения установщика: в выводе адрес прокси может быть без схемы или с символами,
+ * на которых регулярка не сработает. Заменяется userinfo вместе с @, чтобы короткое имя не портило остальной текст
+ */
+export function redactProxyCredentials(text: string, environment: NodeJS.ProcessEnv): string {
+  let redactedText = text;
+  for (const variableName of PROXY_ENVIRONMENT_VARIABLES) {
+    const proxyAddress = environment[variableName]?.replace(URL_SCHEME_PREFIX_PATTERN, '');
+    const separatorIndex = proxyAddress?.lastIndexOf(USER_INFORMATION_SEPARATOR) ?? -1;
+    if (proxyAddress === undefined || separatorIndex <= 0) {
+      continue;
+    }
+    const userInformation = proxyAddress.slice(0, separatorIndex + USER_INFORMATION_SEPARATOR.length);
+    redactedText = redactedText.replaceAll(userInformation, `${REDACTED_USER_INFORMATION}${USER_INFORMATION_SEPARATOR}`);
+  }
+  return redactedText;
 }
 
 export interface InstallationOutput {
@@ -147,7 +170,10 @@ function findInspectedErrorCode(lines: readonly string[], errorHeaderIndex: numb
   return undefined;
 }
 
-export function extractInstallationFailureReason(output: InstallationOutput): string {
+export function extractInstallationFailureReason(
+  output: InstallationOutput,
+  environment: NodeJS.ProcessEnv = process.env,
+): string {
   const failureMarkerIndex = findLastLineIndex(output.stdoutLines, (line) => line.includes(INSTALLATION_FAILURE_MARKER));
   const summary = failureMarkerIndex === -1 ? '' : cleanOutputLines(output.stdoutLines.slice(failureMarkerIndex + 1));
 
@@ -170,7 +196,7 @@ export function extractInstallationFailureReason(output: InstallationOutput): st
   } else {
     reason = summary || detail || output.exitDescription;
   }
-  return redactUrlCredentials(reason).slice(0, INSTALLATION_FAILURE_REASON_MAX_LENGTH);
+  return redactUrlCredentials(redactProxyCredentials(reason, environment)).slice(0, INSTALLATION_FAILURE_REASON_MAX_LENGTH);
 }
 
 export interface InstallationChildProcess {
@@ -327,6 +353,7 @@ export function createBrowserInstaller(dependencies: BrowserInstallerDependencie
     spawnProcess = spawnWithChildProcess,
     resolveCliPath = () => resolvePlaywrightCliPath(),
     processEvents = process,
+    environment: installerEnvironment = process.env,
   } = dependencies;
 
   const createInstallationError = (description: string) =>
@@ -359,8 +386,12 @@ export function createBrowserInstaller(dependencies: BrowserInstallerDependencie
     }
 
     let temporaryDirectory: string;
+    let preparedDirectoryDescription = `browsers directory ${browsersDirectory}`;
     try {
-      await mkdir(temporaryRootDirectory, { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
+      /* Playwright создаёт папку сборок без явного режима, а подпапки внутри 0700 уже недоступны другим */
+      await ensurePrivateDirectory(browsersDirectory);
+      preparedDirectoryDescription = `installer temporary directory ${temporaryRootDirectory}`;
+      await ensurePrivateDirectory(temporaryRootDirectory);
       /* Одновременно установщик запускает только держатель login.lock, поэтому здесь только остатки после SIGKILL */
       const leftoverNames = (await readdir(temporaryRootDirectory)).filter((name) =>
         name.startsWith(INSTALLATION_TEMPORARY_DIRECTORY_PREFIX),
@@ -378,8 +409,12 @@ export function createBrowserInstaller(dependencies: BrowserInstallerDependencie
       temporaryDirectory = join(temporaryRootDirectory, `${INSTALLATION_TEMPORARY_DIRECTORY_PREFIX}${randomUUID()}`);
       await mkdir(temporaryDirectory, { mode: PRIVATE_DIRECTORY_MODE });
     } catch (error) {
+      /* Symlink или чужая папка не исправляются ручной установкой, поэтому STATE_DIRECTORY_UNSAFE идёт как есть */
+      if (error instanceof MattermostAuthenticationError) {
+        throw error;
+      }
       throw createInstallationError(
-        `could not prepare installer temporary directory ${temporaryRootDirectory} (${getErrorCode(error) ?? UNKNOWN_ERROR_CODE})`,
+        `could not prepare ${preparedDirectoryDescription} (${getErrorCode(error) ?? UNKNOWN_ERROR_CODE}). Run manually: ${manualCommand}`,
       );
     }
 
@@ -437,11 +472,7 @@ export function createBrowserInstaller(dependencies: BrowserInstallerDependencie
             dependencies.nodeExecutablePath ?? process.execPath,
             [cliPath, ...CHROMIUM_INSTALL_ARGUMENTS],
             {
-              env: buildInstallationEnvironment(
-                browsersDirectory,
-                temporaryDirectory,
-                dependencies.environment ?? process.env,
-              ),
+              env: buildInstallationEnvironment(browsersDirectory, temporaryDirectory, installerEnvironment),
               stdio: ['ignore', 'pipe', 'pipe'],
             },
           );
@@ -532,7 +563,9 @@ export function createBrowserInstaller(dependencies: BrowserInstallerDependencie
       });
 
       if (installerOutcome.kind === 'start-failed') {
-        throw createInstallationError(`could not start installer: ${installerOutcome.errorCode}`);
+        throw createInstallationError(
+          `could not start installer: ${installerOutcome.errorCode}. Run manually: ${manualCommand}`,
+        );
       }
       if (terminationReason !== undefined || installerOutcome.kind === 'termination-expired') {
         logger(`Chromium installation ${terminationReason}, installer terminated`);
@@ -545,12 +578,15 @@ export function createBrowserInstaller(dependencies: BrowserInstallerDependencie
         return;
       }
 
-      const reason = extractInstallationFailureReason({
-        stdoutLines: stdoutBuffer.lines,
-        stderrLines: stderrBuffer.lines,
-        exitDescription:
-          installerOutcome.code !== null ? `exit code ${installerOutcome.code}` : `signal ${installerOutcome.signal}`,
-      });
+      const reason = extractInstallationFailureReason(
+        {
+          stdoutLines: stdoutBuffer.lines,
+          stderrLines: stderrBuffer.lines,
+          exitDescription:
+            installerOutcome.code !== null ? `exit code ${installerOutcome.code}` : `signal ${installerOutcome.signal}`,
+        },
+        installerEnvironment,
+      );
       logger(`Chromium installation failed: ${reason}`);
       throw createInstallationError(`Chromium download failed: ${reason}. Run manually: ${manualCommand}`);
     } finally {

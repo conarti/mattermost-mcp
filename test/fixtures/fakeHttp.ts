@@ -7,6 +7,7 @@ export interface FakeHttpRecord {
   readonly authorization: string | undefined;
   readonly body: string | undefined;
   readonly signal: AbortSignal | undefined;
+  readonly redirect: HttpRequest['redirect'];
 }
 
 export interface FakeHttpReply {
@@ -56,6 +57,7 @@ export class FakeHttp {
         authorization: request.headers[AUTHORIZATION_HEADER_NAME],
         body: request.body,
         signal: request.signal,
+        redirect: request.redirect,
       };
       this.records.push(record);
       return createResponse(this.scenario(extractToken(record.authorization), record));

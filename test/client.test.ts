@@ -31,6 +31,7 @@ const START_MILLISECONDS = 1_000_000_000_000;
 const FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS = 5_000;
 const SITE_URL = 'https://chat.example.test';
 const MATTERMOST_URL = `${SITE_URL}/api/v4`;
+const SITE_HOSTNAME = new URL(SITE_URL).hostname;
 const TEAM_ID = 'team-test';
 const USER_ID = 'user-1';
 const OTHER_USER_ID = 'user-2';
@@ -237,6 +238,11 @@ test('C1: every public method sends the current provider token and keeps its req
       const newRecords = http.records.slice(firstRecordIndex);
       assert.deepEqual(describeRequests(newRecords), expectedRequests, name);
       assert.deepEqual(
+        newRecords.map((record) => record.redirect),
+        expectedRequests.map(() => undefined),
+        name,
+      );
+      assert.deepEqual(
         newRecords.map((record) => record.authorization),
         expectedRequests.map(() => `Bearer ${currentToken}`),
         name,
@@ -422,7 +428,7 @@ test('C6: two call views that get 401 at the same time share one browser sign-in
   const clock = new FakeClock(START_MILLISECONDS);
   const logs = createLogCapture();
   const browserContext = new FakeLoginBrowserContext({
-    cookieSteps: [[], [], [{ name: SESSION_COOKIE_NAME, value: FRESH_TOKEN }]],
+    cookieSteps: [[], [], [{ name: SESSION_COOKIE_NAME, value: FRESH_TOKEN, domain: SITE_HOSTNAME }]],
   });
   const launcher = new FakeLoginBrowserLauncher(browserContext);
   const http = new FakeHttp(createTokenScenario({ [FRESH_TOKEN]: { status: 200, body: { id: USER_ID } } }, UNAUTHORIZED_REPLY));
@@ -450,6 +456,11 @@ test('C6: two call views that get 401 at the same time share one browser sign-in
     (record) => record.url === `${MATTERMOST_URL}/users/me` && record.authorization === `Bearer ${EXPIRED_TOKEN}`,
   );
   assert.equal(rejectedRequests.length, 2);
+  /* Редиректы выключены только у проверки токена из окна входа, запросы клиента идут как в 1.1.2 */
+  const validationRequests = http.records.filter((record) => record.redirect === 'manual');
+  assert.equal(validationRequests.length, 1);
+  assert.equal(validationRequests[0].url, `${MATTERMOST_URL}/users/me`);
+  assert.equal(http.records.filter((record) => record.redirect !== 'manual' && record.redirect !== undefined).length, 0);
 });
 
 test('C7: a call cancelled while waiting for sign-in sends no action request, and the sign-in still saves the token', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async (t) => {
@@ -465,7 +476,7 @@ test('C7: a call cancelled while waiting for sign-in sends no action request, an
     const clock = new FakeClock(START_MILLISECONDS);
     const logs = createLogCapture();
     const launcher = new FakeLoginBrowserLauncher(
-      new FakeLoginBrowserContext({ cookieSteps: [[], [], [{ name: SESSION_COOKIE_NAME, value: FRESH_TOKEN }]] }),
+      new FakeLoginBrowserContext({ cookieSteps: [[], [], [{ name: SESSION_COOKIE_NAME, value: FRESH_TOKEN, domain: SITE_HOSTNAME }]] }),
     );
     const http = new FakeHttp(createTokenScenario({ [FRESH_TOKEN]: { status: 200, body: { id: USER_ID } } }, UNAUTHORIZED_REPLY));
     const tokenProvider = createTokenProvider(CONFIG, http.fetch, { homeDirectory, launcher, clock, logger: logs.logger });

@@ -73,7 +73,10 @@ const launcher: LoginBrowserLauncher = {
       setTimeout(() => context.emitClose(), WINDOW_CLOSE_DELAY_MILLISECONDS);
     } else {
       setTimeout(
-        () => context.cookieSteps.push([{ name: SESSION_COOKIE_NAME, value: LOGIN_WORKER_TOKENS.FRESH }]),
+        () =>
+          context.cookieSteps.push([
+            { name: SESSION_COOKIE_NAME, value: LOGIN_WORKER_TOKENS.FRESH, domain: new URL(FIXTURE_MATTERMOST_URL).hostname },
+          ]),
         SESSION_COOKIE_DELAY_MILLISECONDS,
       );
     }

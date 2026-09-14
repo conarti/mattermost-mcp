@@ -37,7 +37,7 @@ test('O1: browser sign-in logs the expected lines to stderr without the token va
   const clock = new FakeClock(START_MILLISECONDS);
   const errorOutput = t.mock.method(console, 'error', () => undefined);
   const browserContext = new FakeLoginBrowserContext({
-    cookieSteps: [[], [{ name: 'MMAUTHTOKEN', value: FRESH_TOKEN }]],
+    cookieSteps: [[], [{ name: 'MMAUTHTOKEN', value: FRESH_TOKEN, domain: 'chat.example.test' }]],
   });
   const fetchImplementation: HttpFetch = async (_url, request) =>
     createResponse(request.headers.Authorization === `Bearer ${FRESH_TOKEN}` ? 200 : 401);

@@ -6,13 +6,17 @@ import {
   AuthenticationTimings,
   BROWSER_INSTALLATION_COMPLETE_MARKER_FILE_NAME,
   CHROMIUM_INSTALL_ARGUMENTS,
+  CHROMIUM_SANDBOX_DISABLED_MESSAGE,
   CLOSE_EVENT,
   CURRENT_USER_API_PATH,
+  DISABLE_CHROMIUM_SANDBOX_VALUE,
+  DISABLE_CHROMIUM_SANDBOX_VARIABLE,
   LOGIN_PAGE_PATH,
   LOGIN_PAGE_WAIT_CONDITION,
   LOGIN_WAITING_LOG_INTERVAL_MILLISECONDS,
   MILLISECONDS_PER_SECOND,
   MISSING_BROWSER_EXECUTABLE_MARKER,
+  MISSING_SANDBOX_MARKERS,
   MISSING_SYSTEM_DEPENDENCIES_MARKER,
   PINNED_PLAYWRIGHT_VERSION,
   PLAYWRIGHT_BROWSERS_PATH_VARIABLE,
@@ -34,6 +38,7 @@ import {
 import { StatePaths, ensurePrivateDirectory, ensureStateDirectory } from './stateFiles.js';
 
 const PARENT_DIRECTORY_SEGMENT = '..';
+const DOMAIN_COOKIE_PREFIX = '.';
 
 export function deriveSiteUrl(mattermostApiUrl: string): string {
   let parsedUrl: URL;
@@ -62,6 +67,8 @@ export function buildSessionCookieUrl(siteUrl: string): string {
 export interface LoginBrowserCookie {
   name: string;
   value: string;
+  /** Для cookie с атрибутом Domain Playwright возвращает домен с точкой в начале */
+  domain: string;
 }
 
 export interface LoginBrowserPage {
@@ -92,14 +99,23 @@ type PlaywrightSignalHandlerOption = 'handleSIGINT' | 'handleSIGTERM' | 'handleS
 export interface ChromiumLaunchOptions extends Record<PlaywrightSignalHandlerOption, false> {
   headless: false;
   timeout: number;
+  /** По умолчанию Playwright запускает Chromium с --no-sandbox, а окно показывает контент участников Mattermost */
+  chromiumSandbox: boolean;
 }
 
 export function buildChromiumLaunchOptions(
   timings: Pick<AuthenticationTimings, 'browserLaunchTimeoutMilliseconds'>,
+  environment: NodeJS.ProcessEnv,
+  logger: AuthenticationLogger,
 ): ChromiumLaunchOptions {
+  const chromiumSandbox = environment[DISABLE_CHROMIUM_SANDBOX_VARIABLE] !== DISABLE_CHROMIUM_SANDBOX_VALUE;
+  if (!chromiumSandbox) {
+    logger(CHROMIUM_SANDBOX_DISABLED_MESSAGE);
+  }
   return {
     headless: false,
     timeout: timings.browserLaunchTimeoutMilliseconds,
+    chromiumSandbox,
     handleSIGINT: false,
     handleSIGTERM: false,
     handleSIGHUP: false,
@@ -152,7 +168,10 @@ export async function loadChromium(
 export interface PlaywrightChromiumLauncherOptions {
   paths: StatePaths;
   timings: AuthenticationTimings;
+  logger: AuthenticationLogger;
   loadPlaywright?: LoadPlaywright;
+  /** По умолчанию process.env */
+  environment?: NodeJS.ProcessEnv;
 }
 
 function createBrowserNotInstalledError(browsersDirectory: string): MattermostAuthenticationError {
@@ -203,7 +222,7 @@ async function inspectChromiumFiles(
 }
 
 export function createPlaywrightChromiumLauncher(options: PlaywrightChromiumLauncherOptions): LoginBrowserLauncher {
-  const { paths, timings, loadPlaywright } = options;
+  const { paths, timings, logger, loadPlaywright, environment = process.env } = options;
 
   const loadAndInspect = async () => {
     const chromium = await loadChromium(paths.browsersDirectory, loadPlaywright);
@@ -221,7 +240,10 @@ export function createPlaywrightChromiumLauncher(options: PlaywrightChromiumLaun
       await ensureStateDirectory(paths);
       await ensurePrivateDirectory(profileDirectory);
       try {
-        return await chromium.launchPersistentContext(profileDirectory, buildChromiumLaunchOptions(timings));
+        return await chromium.launchPersistentContext(
+          profileDirectory,
+          buildChromiumLaunchOptions(timings, environment, logger),
+        );
       } catch (error) {
         throw translateBrowserLaunchError(error, paths);
       }
@@ -238,6 +260,12 @@ export function translateBrowserLaunchError(error: unknown, paths: StatePaths): 
     return new MattermostAuthenticationError(
       AUTHENTICATION_ERROR_CODES.BROWSER_SYSTEM_DEPENDENCIES_MISSING,
       `Chromium cannot start because system libraries are missing. Run: ${buildSystemDependenciesInstallCommand()}`,
+    );
+  }
+  if (MISSING_SANDBOX_MARKERS.some((marker) => message.includes(marker))) {
+    return new MattermostAuthenticationError(
+      AUTHENTICATION_ERROR_CODES.BROWSER_SANDBOX_UNAVAILABLE,
+      `Chromium cannot start because the operating system sandbox is unavailable, for example unprivileged user namespaces are disabled. Enable the sandbox for this user, or only if that is not possible set ${DISABLE_CHROMIUM_SANDBOX_VARIABLE}=${DISABLE_CHROMIUM_SANDBOX_VALUE} for the server and retry.`,
     );
   }
   if (PROFILE_IN_USE_MARKERS.some((marker) => message.includes(marker))) {
@@ -320,6 +348,8 @@ export function createBrowserLogin(dependencies: BrowserLoginDependencies): Perf
     });
 
     const sessionCookieUrls = [buildSessionCookieUrl(siteUrl)];
+    const siteHostname = new URL(siteUrl).hostname;
+    const acceptedCookieDomains = new Set([siteHostname, `${DOMAIN_COOKIE_PREFIX}${siteHostname}`]);
     const rejectedCandidates = new Set<string>();
     let lastCheckDescription = SESSION_COOKIE_NOT_FOUND_DESCRIPTION;
     let lastCookies: LoginBrowserCookie[] = [];
@@ -342,7 +372,14 @@ export function createBrowserLogin(dependencies: BrowserLoginDependencies): Perf
     };
 
     const findCandidate = (cookies: LoginBrowserCookie[]): string | undefined => {
-      const sessionCookies = cookies.filter((cookie) => cookie.name === SESSION_COOKIE_NAME && cookie.value.length > 0);
+      /*
+       * cookies(url) отдаёт и cookie родительского домена, которую мог поставить соседний сайт, поэтому домен
+       * должен совпадать с хостом Mattermost. httpOnly не требуется: прокси перед Mattermost может его снимать
+       */
+      const sessionCookies = cookies.filter(
+        (cookie) =>
+          cookie.name === SESSION_COOKIE_NAME && cookie.value.length > 0 && acceptedCookieDomains.has(cookie.domain),
+      );
       if (sessionCookies.length === 0) {
         lastCheckDescription = SESSION_COOKIE_NOT_FOUND_DESCRIPTION;
         return undefined;

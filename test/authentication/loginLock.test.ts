@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
-import { ChildProcessByStdio, spawn } from 'node:child_process';
+import { ChildProcessByStdio, execFile, spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { access, chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, unlink, writeFile } from 'node:fs/promises';
+import { access, chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { Readable } from 'node:stream';
 import { after, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import {
   CLOSE_EVENT,
   DATA_EVENT,
@@ -36,6 +37,7 @@ import {
   FIXTURE_OUTPUT_LINES,
   FIXTURE_TERMINATION_SIGNAL,
   LOCK_HOLDER_FIXTURE_MODES,
+  MAKE_FIFO_COMMAND,
   OUTPUT_LINE_SEPARATOR,
   PERMISSION_BITS_MASK,
 } from '../fixtures/fixtureConstants.js';
@@ -47,6 +49,7 @@ const MAXIMUM_VALID_PROCESS_ID = 2 ** 31 - 1;
 const FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS = 5_000;
 const CHILD_PROCESS_TEST_TIMEOUT_MILLISECONDS = 30_000;
 const SIGNAL_EXIT_DEADLINE_MILLISECONDS = 2_000;
+const CHILD_PROCESS_EXIT_DEADLINE_MILLISECONDS = 10_000;
 const RENEW_TEMPORARY_FILE_SUFFIX = `.renew${TEMPORARY_FILE_EXTENSION}`;
 
 const temporaryDirectories: string[] = [];
@@ -888,3 +891,88 @@ test('L22: another instance in the same process sees a live lock right after lin
 
   await heldLock.release();
 });
+
+const makeFifoAvailable = spawnSync(MAKE_FIFO_COMMAND, []).error === undefined;
+const MAKE_FIFO_UNAVAILABLE_REASON = 'mkfifo is not installed';
+
+async function makeFifo(filePath: string): Promise<void> {
+  await mkdir(dirname(filePath), { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
+  await promisify(execFile)(MAKE_FIFO_COMMAND, [filePath]);
+}
+
+test(
+  'L23: a FIFO in place of login.lock or login.lock.break is an unreadable record and does not hang',
+  { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS, skip: makeFifoAvailable ? false : MAKE_FIFO_UNAVAILABLE_REASON },
+  async () => {
+    const context = await createLockTestContext();
+    const lock = context.createLock();
+    await makeFifo(context.paths.loginLockPath);
+
+    const staleState = await inspectStaleState(lock);
+    assert.deepEqual(staleState, { kind: 'stale', rawContent: '', reason: 'unreadable record' });
+    const heldLock = await lock.tryBreakStale(staleState);
+    assert.ok(heldLock);
+    assert.deepEqual(await readRecordFile(context.paths.loginLockPath), heldLock.record);
+    assert.ok(context.messages.includes('stale login lock removed (unreadable record)'));
+
+    await makeFifo(context.paths.loginLockBreakPath);
+    assert.equal(await heldLock.renew(), 'renewed');
+    assert.ok(context.messages.includes('stale lock break file removed'));
+    await makeFifo(context.paths.loginLockBreakPath);
+    await heldLock.release();
+    assert.equal(await pathExists(context.paths.loginLockPath), false);
+    assert.equal(await pathExists(context.paths.loginLockBreakPath), false);
+
+    await makeFifo(context.paths.loginLockBreakPath);
+    assert.deepEqual(await lock.inspect(), { kind: 'vacant' });
+    assert.equal(await pathExists(context.paths.loginLockBreakPath), false);
+    assert.equal(context.messages.filter((message) => message === 'stale lock break file removed').length, 3);
+  },
+);
+
+test('L23: a symbolic link in place of lock files is not followed', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
+  const context = await createLockTestContext();
+  const lock = context.createLock();
+  const liveRecordContent = createRecordContent(LIVE_FOREIGN_PROCESS_ID, context.clock.now());
+  const liveRecordPath = join(context.homeDirectory, 'live-record');
+  const liveBreakRecordPath = join(context.homeDirectory, 'live-break-record');
+  await writeFile(liveRecordPath, liveRecordContent);
+  await writeFile(liveBreakRecordPath, createRecordContent(LIVE_FOREIGN_PROCESS_ID, context.clock.now()));
+  await mkdir(context.paths.stateDirectory, { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
+  await symlink(liveRecordPath, context.paths.loginLockPath);
+  await symlink(liveBreakRecordPath, context.paths.loginLockBreakPath);
+
+  const staleState = await inspectStaleState(lock);
+  assert.deepEqual(staleState, { kind: 'stale', rawContent: '', reason: 'unreadable record' });
+  assert.equal(await pathExists(context.paths.loginLockBreakPath), false);
+  const heldLock = await lock.tryBreakStale(staleState);
+  assert.ok(heldLock);
+  assert.deepEqual(await readRecordFile(context.paths.loginLockPath), heldLock.record);
+  assert.equal(await readFile(liveRecordPath, TEXT_FILE_ENCODING), liveRecordContent);
+  assert.equal(await pathExists(liveBreakRecordPath), true);
+
+  await heldLock.release();
+});
+
+test(
+  'L24: exit handler does not hang on a FIFO in place of login.lock.break',
+  { timeout: CHILD_PROCESS_TEST_TIMEOUT_MILLISECONDS, skip: makeFifoAvailable ? false : MAKE_FIFO_UNAVAILABLE_REASON },
+  async () => {
+    const temporaryDirectory = await createTemporaryHome();
+    const homeDirectory = join(temporaryDirectory, 'home');
+    const markerPath = join(temporaryDirectory, 'marker');
+    const paths = resolveStatePaths(homeDirectory);
+    const fixture = startFixtureProcess(FIXTURE_FILE_NAMES.EXIT_HANDLER, [
+      homeDirectory,
+      markerPath,
+      EXIT_HANDLER_FIXTURE_MODES.FIFO_BREAK,
+    ]);
+
+    const { code, signal } = await waitWithDeadline(fixture.exited, CHILD_PROCESS_EXIT_DEADLINE_MILLISECONDS, 'fixture exit');
+    assert.equal(code, 0);
+    assert.equal(signal, null);
+    assert.equal(await pathExists(markerPath), true);
+    assert.equal((await lstat(paths.loginLockBreakPath)).isFIFO(), true);
+    assert.equal(await pathExists(paths.loginLockPath), true);
+  },
+);

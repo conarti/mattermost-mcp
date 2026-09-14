@@ -40,7 +40,10 @@ export const EXIT_HANDLER_FIXTURE_MODES = {
   REMOVE_STATE_DIRECTORY: 'remove-state-directory',
   REMOVE_LOCK_FILE: 'remove-lock-file',
   OWN_BREAK: 'own-break',
+  FIFO_BREAK: 'fifo-break',
 } as const;
+
+export const MAKE_FIFO_COMMAND = 'mkfifo';
 
 export const PLAYWRIGHT_CLI_FIXTURE_MODES = {
   SUCCESS: 'success',

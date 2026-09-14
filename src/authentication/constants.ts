@@ -27,6 +27,17 @@ export const PROFILE_IN_USE_MARKERS = [
   'Failed to create a ProcessSingleton',
   'Opening in existing browser session',
 ] as const;
+/* Playwright заменяет журнал запуска с No usable sandbox своим текстом Chromium sandboxing failed */
+export const MISSING_SANDBOX_MARKERS = ['No usable sandbox', 'Chromium sandboxing failed'] as const;
+export const DISABLE_CHROMIUM_SANDBOX_VARIABLE = 'MATTERMOST_MCP_DISABLE_CHROMIUM_SANDBOX';
+export const DISABLE_CHROMIUM_SANDBOX_VALUE = '1';
+export const CHROMIUM_SANDBOX_DISABLED_MESSAGE = `Chromium sandbox is disabled by ${DISABLE_CHROMIUM_SANDBOX_VARIABLE}=${DISABLE_CHROMIUM_SANDBOX_VALUE}: the sign-in window renders Mattermost content without process isolation`;
+export const PROXY_ENVIRONMENT_VARIABLES = ['HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'ALL_PROXY', 'all_proxy'] as const;
+export const URL_SCHEME_PREFIX_PATTERN = /^[a-z][a-z\d+.-]*:\/\//i;
+export const USER_INFORMATION_SEPARATOR = '@';
+export const REDACTED_USER_INFORMATION = '***';
+export const HTTP_PROTOCOL = 'http:';
+export const LOOPBACK_HOSTNAMES = ['localhost', '127.0.0.1', '[::1]'] as const;
 export const AUTHENTICATION_LOG_PREFIX = '[auth]';
 export const LOGIN_PROGRESS_MESSAGE = 'Waiting for Mattermost sign-in in the browser window';
 export const BROWSER_INSTALLATION_PROGRESS_MESSAGE = 'Downloading Chromium for Mattermost sign-in';
@@ -47,6 +58,7 @@ export const AUTHENTICATION_ERROR_CODES = {
   BROWSER_NOT_INSTALLED: 'BROWSER_NOT_INSTALLED',
   BROWSER_INSTALLATION_FAILED: 'BROWSER_INSTALLATION_FAILED',
   BROWSER_SYSTEM_DEPENDENCIES_MISSING: 'BROWSER_SYSTEM_DEPENDENCIES_MISSING',
+  BROWSER_SANDBOX_UNAVAILABLE: 'BROWSER_SANDBOX_UNAVAILABLE',
   STATE_DIRECTORY_UNSAFE: 'STATE_DIRECTORY_UNSAFE',
   UNAUTHORIZED_AFTER_RETRY: 'UNAUTHORIZED_AFTER_RETRY',
   REQUEST_CANCELLED: 'REQUEST_CANCELLED',
@@ -94,7 +106,8 @@ export const INSPECTED_PROPERTY_LINE_PATTERN = /^\s+[\w$]+: /;
 export const ERROR_HEADER_LINE_PATTERN = /^\s*(?:[A-Z]\w*)?Error\b/;
 export const INSPECTED_ERROR_CODE_LINE_PATTERN = /^\s+code: '([^'\s]+)',?\s*$/;
 export const SPAWN_SYSTEM_CALL_PATTERN = /^spawn(?:\s|$)/;
-export const URL_CREDENTIALS_PATTERN = /\/\/[^\s/?#]*@/g;
+/* Жадный захват до последнего @ в слове: пароль прокси может содержать /, ? и # без кодирования */
+export const URL_CREDENTIALS_PATTERN = /\/\/\S*@/g;
 export const REDACTED_URL_CREDENTIALS = '//***@';
 export const TRAILING_SLASHES_PATTERN = /\/+$/;
 
@@ -108,6 +121,7 @@ export const CONTENT_TYPE_HEADER_NAME = 'Content-Type';
 export const JSON_CONTENT_TYPE = 'application/json';
 export const HTTP_GET_METHOD = 'GET';
 export const HTTP_POST_METHOD = 'POST';
+export const HTTP_REDIRECT_MANUAL = 'manual';
 export const HTTP_STATUS_OK = 200;
 export const HTTP_STATUS_UNAUTHORIZED = 401;
 export const UNKNOWN_ERROR_NAME = 'UnknownError';

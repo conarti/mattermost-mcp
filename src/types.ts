@@ -140,6 +140,8 @@ export interface HttpRequest {
   headers: Record<string, string>;
   body?: string;
   signal?: AbortSignal;
+  /** Без значения запрос следует редиректам, как в 1.1.2 */
+  redirect?: 'follow' | 'manual' | 'error';
 }
 
 export interface HttpResponse {

@@ -8,6 +8,7 @@ import { after, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { LATEST_PROTOCOL_VERSION } from '@modelcontextprotocol/sdk/types.js';
 import {
+  AUTHENTICATION_LOG_PREFIX,
   AUTHENTICATION_MODES,
   AUTHENTICATION_MODE_LOG_PREFIX,
   DATA_EVENT,
@@ -33,6 +34,9 @@ const CHILD_PROCESS_TEST_TIMEOUT_MILLISECONDS = 30_000;
 const STATIC_TOKEN = 'static-secret-token-0001';
 const TOOLS_LIST_REQUEST_ID = 2;
 const EXPECTED_TOOL_COUNT = 9;
+const UNENCRYPTED_URL_WARNING_FRAGMENT = 'sent without encryption';
+/* Сервер не обращается к адресу до вызова инструмента, поэтому несуществующий хост не даёт сетевых запросов */
+const UNENCRYPTED_REMOTE_MATTERMOST_URL = 'http://chat.example.test/api/v4';
 
 const temporaryDirectories: string[] = [];
 const startedServers: ChildProcessWithoutNullStreams[] = [];
@@ -67,12 +71,13 @@ async function runServerUntilToolsList(
   homeDirectory: string,
   token: string | undefined,
   stopSignal: NodeJS.Signals = FIXTURE_TERMINATION_SIGNAL,
+  mattermostUrl: string = FIXTURE_MATTERMOST_URL,
 ): Promise<ServerRun> {
   const serverPath = fileURLToPath(new URL('../../src/index.js', import.meta.url));
   const environment: NodeJS.ProcessEnv = {
     ...environmentWithout('MATTERMOST_TOKEN', PLAYWRIGHT_BROWSERS_PATH_VARIABLE),
     HOME: homeDirectory,
-    MATTERMOST_URL: FIXTURE_MATTERMOST_URL,
+    MATTERMOST_URL: mattermostUrl,
     MATTERMOST_TEAM_ID: FIXTURE_TEAM_ID,
   };
   if (token !== undefined) {
@@ -190,6 +195,7 @@ test(
     assert.deepEqual(run.toolNames, tools.map((tool) => tool.name));
     assert.equal(existsSync(resolveStatePaths(homeDirectory).stateDirectory), false);
     assert.ok(run.standardError.includes(`${AUTHENTICATION_MODE_LOG_PREFIX} ${AUTHENTICATION_MODES.BROWSER}`), run.standardError);
+    assert.equal(run.standardError.includes(UNENCRYPTED_URL_WARNING_FRAGMENT), false, run.standardError);
     assertOnlyJsonRpcOnStandardOutput(run);
     assert.equal(run.exitSignal, null, run.standardError);
     assert.equal(run.exitCode, 0, run.standardError);
@@ -228,5 +234,35 @@ test(
       assert.equal(run.exitSignal, null, run.standardError);
       assert.equal(run.exitCode, 0, run.standardError);
     }
+  },
+);
+
+test(
+  'U4: browser mode warns once about an http MATTERMOST_URL outside loopback, static mode does not',
+  { timeout: CHILD_PROCESS_TEST_TIMEOUT_MILLISECONDS },
+  async () => {
+    const browserRun = await runServerUntilToolsList(
+      await createTemporaryHome(),
+      undefined,
+      FIXTURE_TERMINATION_SIGNAL,
+      UNENCRYPTED_REMOTE_MATTERMOST_URL,
+    );
+    const warningLines = browserRun.standardError
+      .split(OUTPUT_LINE_SEPARATOR)
+      .filter((line) => line.includes(UNENCRYPTED_URL_WARNING_FRAGMENT));
+    assert.equal(warningLines.length, 1, browserRun.standardError);
+    assert.ok(warningLines[0].startsWith(`${AUTHENTICATION_LOG_PREFIX} MATTERMOST_URL uses http:// for chat.example.test`), warningLines[0]);
+    assert.equal(browserRun.toolNames.length, EXPECTED_TOOL_COUNT);
+    assertOnlyJsonRpcOnStandardOutput(browserRun);
+    assert.equal(browserRun.exitCode, 0, browserRun.standardError);
+
+    const staticRun = await runServerUntilToolsList(
+      await createTemporaryHome(),
+      STATIC_TOKEN,
+      FIXTURE_TERMINATION_SIGNAL,
+      UNENCRYPTED_REMOTE_MATTERMOST_URL,
+    );
+    assert.equal(staticRun.standardError.includes(UNENCRYPTED_URL_WARNING_FRAGMENT), false, staticRun.standardError);
+    assert.equal(staticRun.toolNames.length, EXPECTED_TOOL_COUNT);
   },
 );

@@ -727,7 +727,7 @@ test('N15: a deadline that passes while the lock is being taken gives LOGIN_TIME
 });
 
 function sessionCookie(value: string): FakeCookieStep {
-  return [{ name: 'MMAUTHTOKEN', value }];
+  return [{ name: 'MMAUTHTOKEN', value, domain: new URL(SITE_URL).hostname }];
 }
 
 for (const variant of [
@@ -760,12 +760,14 @@ for (const variant of [
   });
 }
 
-function createFakeResponse(status: number): HttpResponse {
+const CURRENT_USER_BODY = { id: 'user-1', username: 'user-one' };
+
+function createFakeResponse(status: number, readBody: () => unknown = () => CURRENT_USER_BODY): HttpResponse {
   return {
     ok: status >= 200 && status < 300,
     status,
     statusText: `status ${status}`,
-    json: async () => ({}),
+    json: async () => readBody(),
     text: async () => '',
   };
 }
@@ -784,6 +786,34 @@ test('N17: the token validator maps statuses, exceptions and timeouts', { timeou
   assert.equal(requests[0].request.method, 'GET');
   assert.equal(requests[0].request.headers.Authorization, 'Bearer candidate-token-1');
   assert.ok(requests[0].request.signal instanceof AbortSignal);
+  assert.equal(requests[0].request.redirect, 'manual');
+
+  const unexpectedBodies: Array<() => unknown> = [
+    () => {
+      throw new SyntaxError('Unexpected token < in JSON at position 0');
+    },
+    () => ({}),
+    () => ({ id: 42 }),
+    () => [CURRENT_USER_BODY],
+    () => null,
+    () => 'user-1',
+  ];
+  for (const readBody of unexpectedBodies) {
+    behavior = async () => createFakeResponse(200, readBody);
+    assert.deepEqual(await validateToken('candidate-token-1'), {
+      kind: 'unavailable',
+      statusDescription: 'unexpected /users/me body',
+    });
+  }
+
+  for (const redirectStatus of [301, 302, 303, 307, 308]) {
+    behavior = async () => createFakeResponse(redirectStatus);
+    assert.deepEqual(await validateToken('candidate-token-1'), {
+      kind: 'unavailable',
+      statusDescription: `status ${redirectStatus}`,
+    });
+  }
+  assert.ok(requests.every(({ request }) => request.redirect === 'manual'));
 
   behavior = async () => createFakeResponse(401);
   assert.deepEqual(await validateToken('candidate-token-1'), { kind: 'rejected', statusDescription: 'status 401' });

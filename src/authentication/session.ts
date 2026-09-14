@@ -1,5 +1,5 @@
 import { AuthenticationMode, Config, resolveAuthenticationMode } from '../config.js';
-import type { HttpFetch } from '../types.js';
+import type { HttpFetch, HttpResponse } from '../types.js';
 import { InstallBrowser, createBrowserInstaller } from './browserInstallation.js';
 import {
   LoginBrowserLauncher,
@@ -22,6 +22,7 @@ import {
   CURRENT_USER_API_PATH,
   DEFAULT_AUTHENTICATION_TIMINGS,
   HTTP_GET_METHOD,
+  HTTP_REDIRECT_MANUAL,
   HTTP_STATUS_OK,
   HTTP_STATUS_UNAUTHORIZED,
   INSTALLATION_ABORT_REASONS,
@@ -648,6 +649,18 @@ export class BrowserAuthenticationSession implements TokenProvider {
   }
 }
 
+const UNEXPECTED_CURRENT_USER_BODY_DESCRIPTION = `unexpected ${CURRENT_USER_API_PATH} body`;
+
+async function isCurrentUserBody(response: HttpResponse): Promise<boolean> {
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    return false;
+  }
+  return typeof body === 'object' && body !== null && typeof (body as Record<string, unknown>).id === 'string';
+}
+
 export function createTokenValidator(
   apiBaseUrl: string,
   fetchImplementation: HttpFetch,
@@ -656,14 +669,18 @@ export function createTokenValidator(
   const currentUserUrl = `${apiBaseUrl.replace(TRAILING_SLASHES_PATTERN, '')}${CURRENT_USER_API_PATH}`;
   return async (candidateToken) => {
     try {
+      /* Без редиректов: иначе 200 от страницы входа или прокси по адресу редиректа сошёл бы за валидный токен */
       const response = await fetchImplementation(currentUserUrl, {
         method: HTTP_GET_METHOD,
         headers: { [AUTHORIZATION_HEADER_NAME]: `${BEARER_TOKEN_PREFIX}${candidateToken}` },
         signal: AbortSignal.timeout(timeoutMilliseconds),
+        redirect: HTTP_REDIRECT_MANUAL,
       });
       const statusDescription = `status ${response.status}`;
       if (response.status === HTTP_STATUS_OK) {
-        return { kind: 'valid', statusDescription };
+        return (await isCurrentUserBody(response))
+          ? { kind: 'valid', statusDescription }
+          : { kind: 'unavailable', statusDescription: UNEXPECTED_CURRENT_USER_BODY_DESCRIPTION };
       }
       if (response.status === HTTP_STATUS_UNAUTHORIZED) {
         return { kind: 'rejected', statusDescription };
@@ -701,7 +718,7 @@ export function createTokenProvider(
   const timings: AuthenticationTimings = { ...DEFAULT_AUTHENTICATION_TIMINGS, ...overrides.timings };
   const clock = overrides.clock ?? systemClock;
   const logger = overrides.logger ?? createStderrAuthenticationLogger();
-  const launcher = overrides.launcher ?? createPlaywrightChromiumLauncher({ paths, timings });
+  const launcher = overrides.launcher ?? createPlaywrightChromiumLauncher({ paths, timings, logger });
   return new BrowserAuthenticationSession({
     siteUrl,
     paths,

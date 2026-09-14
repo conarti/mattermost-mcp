@@ -6,6 +6,8 @@ import {
   BROWSERS_DIRECTORY_NAME,
   CHROMIUM_INSTALL_ARGUMENTS,
   CONFIG_DIRECTORY_NAME,
+  HTTP_PROTOCOL,
+  LOOPBACK_HOSTNAMES,
   PLAYWRIGHT_BROWSERS_PATH_VARIABLE,
   PLAYWRIGHT_NPX_PACKAGE,
   PROFILE_DIRECTORY_NAME,
@@ -247,6 +249,24 @@ export function loadConfig(): Config {
 }
 
 export type AuthenticationMode = typeof AUTHENTICATION_MODES[keyof typeof AUTHENTICATION_MODES];
+
+/**
+ * Предупреждение для браузерного входа по http на хост вне loopback: пароль в окне и токен идут без шифрования.
+ * @returns текст предупреждения или undefined, если адрес безопасен или не разбирается
+ */
+export function describeUnencryptedMattermostUrl(mattermostUrl: string): string | undefined {
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(mattermostUrl);
+  } catch {
+    return undefined;
+  }
+  const loopbackHostnames: readonly string[] = LOOPBACK_HOSTNAMES;
+  if (parsedUrl.protocol !== HTTP_PROTOCOL || loopbackHostnames.includes(parsedUrl.hostname)) {
+    return undefined;
+  }
+  return `MATTERMOST_URL uses http:// for ${parsedUrl.hostname}: the password entered in the sign-in window and the session token are sent without encryption. Use https://.`;
+}
 
 /** Та же проверка истинности токена, что была в validateConfig: любой непустой токен включает статический режим */
 export function resolveAuthenticationMode(config: Config): AuthenticationMode {

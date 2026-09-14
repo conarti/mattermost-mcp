@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { Stats } from 'node:fs';
-import { constants, lstat, mkdir, open, readdir, rename, unlink } from 'node:fs/promises';
+import { constants, lstat, mkdir, open, readdir, rename, stat, unlink } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
@@ -27,6 +27,10 @@ import {
 import { AuthenticationLogger, MattermostAuthenticationError, getErrorCode } from './runtime.js';
 
 const PERMISSION_BITS_MASK = 0o777;
+const SHARED_WRITE_PERMISSION_BITS = 0o022;
+const STICKY_BIT = 0o1000;
+const ROOT_USER_ID = 0;
+const SHARED_CONFIG_DIRECTORY_MODE = 0o755;
 const PRIVATE_DIRECTORY_OPEN_FLAGS = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
 /* O_NONBLOCK не даёт зависнуть на FIFO, подложенном вместо файла токена */
 const TOKEN_FILE_OPEN_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
@@ -112,10 +116,37 @@ async function securePrivateDirectory(directory: string): Promise<void> {
   });
 }
 
+/*
+ * Чужой пользователь с правом записи в ~/.config или $HOME может переименовать папку состояния и подложить свою.
+ * Проверка идёт по stat с переходом по symlink: важны права той папки, в которой реально лежит состояние
+ */
+async function ensureSafeParentDirectories(stateDirectory: string): Promise<void> {
+  if (process.getuid === undefined) {
+    return;
+  }
+  const configDirectory = dirname(stateDirectory);
+  for (const parentDirectory of [dirname(configDirectory), configDirectory]) {
+    const stats = await stat(parentDirectory);
+    if (stats.uid !== ROOT_USER_ID && isOwnedByAnotherUser(stats)) {
+      throw new MattermostAuthenticationError(
+        AUTHENTICATION_ERROR_CODES.STATE_DIRECTORY_UNSAFE,
+        `State directory ${stateDirectory} is unsafe: parent directory ${parentDirectory} is owned by another user (uid ${stats.uid}). Fix the owner of ${parentDirectory}, then retry.`,
+      );
+    }
+    if ((stats.mode & SHARED_WRITE_PERMISSION_BITS) !== 0 && (stats.mode & STICKY_BIT) === 0) {
+      throw new MattermostAuthenticationError(
+        AUTHENTICATION_ERROR_CODES.STATE_DIRECTORY_UNSAFE,
+        `State directory ${stateDirectory} is unsafe: parent directory ${parentDirectory} is writable by group or others. Run chmod go-w ${parentDirectory}, then retry.`,
+      );
+    }
+  }
+}
+
 export async function ensureStateDirectory(paths: StatePaths): Promise<void> {
   const { stateDirectory } = paths;
-  /* Родительская ~/.config общая для других программ, поэтому создаётся с правами по умолчанию */
-  await mkdir(dirname(stateDirectory), { recursive: true });
+  /* ~/.config общая для других программ и остаётся читаемой, но без записи группе: при umask 002 проверка ниже отвергла бы папку, созданную самим сервером */
+  await mkdir(dirname(stateDirectory), { recursive: true, mode: SHARED_CONFIG_DIRECTORY_MODE });
+  await ensureSafeParentDirectories(stateDirectory);
   try {
     await mkdir(stateDirectory, { mode: PRIVATE_DIRECTORY_MODE });
   } catch (error) {

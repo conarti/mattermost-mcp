@@ -26,6 +26,7 @@ import { FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS, PERMISSION_BITS_MASK } from '../f
 
 const START_MILLISECONDS = 1_000_000_000_000;
 const SITE_URL = 'https://chat.example.test';
+const SITE_HOSTNAME = 'chat.example.test';
 const PROFILE_DIRECTORY = '/fake/home/.config/mattermost-mcp/profile';
 const REJECTED_TOKEN = 'rejected-token-value-1';
 const FRESH_TOKEN = 'fresh-token-value-2';
@@ -46,10 +47,10 @@ after(async () => {
   await Promise.all(temporaryDirectories.map((directory) => rm(directory, { recursive: true, force: true })));
 });
 
-function sessionCookie(value: string): FakeCookieStep {
+function sessionCookie(value: string, domain: string = SITE_HOSTNAME): FakeCookieStep {
   return [
-    { name: 'OTHER', value: 'unrelated' },
-    { name: 'MMAUTHTOKEN', value },
+    { name: 'OTHER', value: 'unrelated', domain },
+    { name: 'MMAUTHTOKEN', value, domain },
   ];
 }
 
@@ -170,7 +171,7 @@ test('B1: site url is derived from the API url and used for the login page and c
   ]);
   assert.deepEqual(rootSite.context.cookieUrls, [['https://chat.example.test/']]);
 
-  const nestedSite = createLoginTestContext({ cookieSteps: [sessionCookie(FRESH_TOKEN)] });
+  const nestedSite = createLoginTestContext({ cookieSteps: [sessionCookie(FRESH_TOKEN, 'host.test')] });
   const nestedLogin = nestedSite.start({ siteUrl: deriveSiteUrl('https://host.test/mm/api/v4') });
   await advanceUntil(nestedSite.clock, () => nestedLogin.settled);
   assert.equal(await nestedLogin.promise, FRESH_TOKEN);
@@ -343,6 +344,14 @@ test('B13: launch errors are translated into authentication error codes', () => 
     'BROWSER_SYSTEM_DEPENDENCIES_MISSING',
   );
   assert.ok(dependencies.message.includes('sudo npx playwright@1.63.0 install-deps chromium'));
+  for (const sandboxMessage of [
+    'browserType.launchPersistentContext: Target page, context or browser has been closed\n[pid=1][err] No usable sandbox! Update your kernel',
+    "browserType.launchPersistentContext: Chromium sandboxing failed!\n  - (alternative): Launch Chromium without sandbox using 'chromiumSandbox: false' option",
+  ]) {
+    const sandbox = expectCode(sandboxMessage, 'BROWSER_SANDBOX_UNAVAILABLE');
+    assert.ok(sandbox.message.includes('MATTERMOST_MCP_DISABLE_CHROMIUM_SANDBOX=1'), sandbox.message);
+    assert.equal(sandbox.message.includes('chromiumSandbox: false'), false);
+  }
 
   const generic = translateBrowserLaunchError(new Error('Something else happened\nsecond line'), paths);
   assert.equal(generic instanceof MattermostAuthenticationError, false);
@@ -396,13 +405,27 @@ test('B14: the Playwright launcher sets the browsers path, inspects the build fi
   const unsupported = createFakePlaywright(() => {
     throw new Error('Browser is not supported on current platform');
   });
-  const unsupportedLauncher = createPlaywrightChromiumLauncher({ paths, timings, loadPlaywright: unsupported.loadPlaywright });
+  const launcherMessages: string[] = [];
+  const launcherLogger = (message: string) => launcherMessages.push(message);
+  const unsupportedLauncher = createPlaywrightChromiumLauncher({
+    paths,
+    timings,
+    logger: launcherLogger,
+    loadPlaywright: unsupported.loadPlaywright,
+    environment: {},
+  });
   await assert.rejects(unsupportedLauncher.inspectInstallation(), isAuthenticationError('BROWSER_NOT_INSTALLED'));
   await assert.rejects(unsupportedLauncher.launch(paths.profileDirectory), isAuthenticationError('BROWSER_NOT_INSTALLED'));
   assert.equal(unsupported.launches.length, 0);
 
   const fakePlaywright = createFakePlaywright(() => executablePath);
-  const launcher = createPlaywrightChromiumLauncher({ paths, timings, loadPlaywright: fakePlaywright.loadPlaywright });
+  const launcher = createPlaywrightChromiumLauncher({
+    paths,
+    timings,
+    logger: launcherLogger,
+    loadPlaywright: fakePlaywright.loadPlaywright,
+    environment: {},
+  });
 
   delete process.env.PLAYWRIGHT_BROWSERS_PATH;
   assert.deepEqual(await launcher.inspectInstallation(), { kind: 'missing', executablePath });
@@ -428,11 +451,87 @@ test('B14: the Playwright launcher sets the browsers path, inspects the build fi
   assert.deepEqual(fakePlaywright.launches, [
     {
       userDataDirectory: paths.profileDirectory,
-      options: { headless: false, timeout: 60000, handleSIGINT: false, handleSIGTERM: false, handleSIGHUP: false },
+      options: {
+        headless: false,
+        timeout: 60000,
+        chromiumSandbox: true,
+        handleSIGINT: false,
+        handleSIGTERM: false,
+        handleSIGHUP: false,
+      },
     },
   ]);
-  assert.deepEqual(buildChromiumLaunchOptions(timings), fakePlaywright.launches[0].options);
+  assert.deepEqual(buildChromiumLaunchOptions(timings, {}, launcherLogger), fakePlaywright.launches[0].options);
   assert.equal((await stat(paths.profileDirectory)).mode & PERMISSION_BITS_MASK, PRIVATE_DIRECTORY_MODE);
+  assert.deepEqual(launcherMessages, []);
+
+  const optedOutLauncher = createPlaywrightChromiumLauncher({
+    paths,
+    timings,
+    logger: launcherLogger,
+    loadPlaywright: fakePlaywright.loadPlaywright,
+    environment: { MATTERMOST_MCP_DISABLE_CHROMIUM_SANDBOX: '1' },
+  });
+  await optedOutLauncher.launch(paths.profileDirectory);
+  assert.equal(fakePlaywright.launches[1].options.chromiumSandbox, false);
+  assert.deepEqual(launcherMessages, [
+    'Chromium sandbox is disabled by MATTERMOST_MCP_DISABLE_CHROMIUM_SANDBOX=1: the sign-in window renders Mattermost content without process isolation',
+  ]);
+});
+
+test('B20: the Chromium sandbox is on unless the opt-out variable is exactly 1, and the opt-out is logged', () => {
+  const timings = DEFAULT_AUTHENTICATION_TIMINGS;
+  for (const environment of [{}, { MATTERMOST_MCP_DISABLE_CHROMIUM_SANDBOX: '0' }, { MATTERMOST_MCP_DISABLE_CHROMIUM_SANDBOX: 'true' }]) {
+    const messages: string[] = [];
+    const options = buildChromiumLaunchOptions(timings, environment, (message) => messages.push(message));
+    assert.equal(options.chromiumSandbox, true, JSON.stringify(environment));
+    assert.deepEqual(messages, []);
+  }
+
+  const messages: string[] = [];
+  const optedOut = buildChromiumLaunchOptions(
+    timings,
+    { MATTERMOST_MCP_DISABLE_CHROMIUM_SANDBOX: '1' },
+    (message) => messages.push(message),
+  );
+  assert.equal(optedOut.chromiumSandbox, false);
+  assert.equal(optedOut.handleSIGTERM, false);
+  assert.equal(messages.length, 1);
+  assert.ok(messages[0].startsWith('Chromium sandbox is disabled by MATTERMOST_MCP_DISABLE_CHROMIUM_SANDBOX=1'));
+});
+
+test('B21: a session cookie of a parent domain is not taken for the Mattermost host', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
+  const teamSiteUrl = 'https://team.example.test';
+  const parentDomainCookies: FakeCookieStep = [
+    { name: 'MMAUTHTOKEN', value: OTHER_TOKEN, domain: 'example.test' },
+    { name: 'MMAUTHTOKEN', value: OTHER_TOKEN, domain: '.example.test' },
+  ];
+
+  const onlyParent = createLoginTestContext({ cookieSteps: [parentDomainCookies] });
+  const onlyParentResult = onlyParent.start({ siteUrl: teamSiteUrl, rejectedToken: undefined });
+  await advanceUntil(onlyParent.clock, () => onlyParentResult.settled);
+  await assert.rejects(onlyParentResult.promise, (error: unknown) => {
+    assert.ok(error instanceof MattermostAuthenticationError);
+    assert.equal(error.code, 'LOGIN_TIMEOUT');
+    assert.ok(error.message.includes('session cookie not found'), error.message);
+    return true;
+  });
+  assert.deepEqual(onlyParent.validatedTokens, []);
+
+  for (const hostCookieDomain of ['team.example.test', '.team.example.test']) {
+    const withHostCookie = createLoginTestContext({
+      cookieSteps: [
+        parentDomainCookies,
+        [...parentDomainCookies, { name: 'MMAUTHTOKEN', value: FRESH_TOKEN, domain: hostCookieDomain }],
+      ],
+      validate: () => ({ kind: 'valid', statusDescription: 'status 200' }),
+    });
+    const withHostCookieResult = withHostCookie.start({ siteUrl: teamSiteUrl, rejectedToken: undefined });
+    await advanceUntil(withHostCookie.clock, () => withHostCookieResult.settled);
+    assert.equal(await withHostCookieResult.promise, FRESH_TOKEN);
+    assert.equal(withHostCookie.context.cookieReadCount, 2);
+    assert.deepEqual(withHostCookie.validatedTokens, [FRESH_TOKEN]);
+  }
 });
 
 test('B15: the manual install command quotes the browsers directory for the shell', () => {
@@ -466,9 +565,9 @@ test('B18: the first session cookie that was not rejected is used when several c
   const withRejectedFirst = createLoginTestContext({
     cookieSteps: [
       [
-        { name: 'MMAUTHTOKEN', value: REJECTED_TOKEN },
-        { name: 'MMAUTHTOKEN', value: '' },
-        { name: 'MMAUTHTOKEN', value: FRESH_TOKEN },
+        { name: 'MMAUTHTOKEN', value: REJECTED_TOKEN, domain: SITE_HOSTNAME },
+        { name: 'MMAUTHTOKEN', value: '', domain: SITE_HOSTNAME },
+        { name: 'MMAUTHTOKEN', value: FRESH_TOKEN, domain: SITE_HOSTNAME },
       ],
     ],
   });
@@ -481,8 +580,8 @@ test('B18: the first session cookie that was not rejected is used when several c
   const rejectedByServer = createLoginTestContext({
     cookieSteps: [
       [
-        { name: 'MMAUTHTOKEN', value: OTHER_TOKEN },
-        { name: 'MMAUTHTOKEN', value: FRESH_TOKEN },
+        { name: 'MMAUTHTOKEN', value: OTHER_TOKEN, domain: SITE_HOSTNAME },
+        { name: 'MMAUTHTOKEN', value: FRESH_TOKEN, domain: SITE_HOSTNAME },
       ],
     ],
   });
@@ -492,7 +591,7 @@ test('B18: the first session cookie that was not rejected is used when several c
   assert.deepEqual(rejectedByServer.validatedTokens, [OTHER_TOKEN, FRESH_TOKEN]);
 
   const onlyRejected = createLoginTestContext({
-    cookieSteps: [[{ name: 'MMAUTHTOKEN', value: REJECTED_TOKEN }]],
+    cookieSteps: [[{ name: 'MMAUTHTOKEN', value: REJECTED_TOKEN, domain: SITE_HOSTNAME }]],
   });
   const onlyRejectedResult = onlyRejected.start();
   await advanceUntil(onlyRejected.clock, () => onlyRejectedResult.settled);

@@ -83,7 +83,7 @@ function countingLoader(monitoringConfig: MonitoringConfig | undefined): { load:
   };
 }
 
-test('R1: two parallel run monitoring calls in browser mode start the monitor once', async (t) => {
+test('J1: two parallel run monitoring calls in browser mode start the monitor once', async (t) => {
   t.mock.method(console, 'error', () => undefined);
   const monitoring = await importFreshMonitoringModule();
   const startReleased = createDeferred<void>();
@@ -112,7 +112,7 @@ test('R1: two parallel run monitoring calls in browser mode start the monitor on
   assert.equal(http.records.filter((record) => record.url === CHANNELS_URL).length, 2);
 });
 
-test('R2: browser mode registers the monitor only after a successful start, so the tool retries after a failed start', async (t) => {
+test('J2: browser mode registers the monitor only after a successful start, so the tool retries after a failed start', async (t) => {
   t.mock.method(console, 'error', () => undefined);
   const monitoring = await importFreshMonitoringModule();
   let failingStartsLeft = 2;
@@ -155,7 +155,7 @@ test('R2: browser mode registers the monitor only after a successful start, so t
   );
 });
 
-test('R3: static mode registers the monitor before start as in 1.1.2, so the tool reuses it after a failed start', async (t) => {
+test('J3: static mode registers the monitor before start as in 1.1.2, so the tool reuses it after a failed start', async (t) => {
   t.mock.method(console, 'error', () => undefined);
   const monitoring = await importFreshMonitoringModule();
   const start = t.mock.method(TopicMonitor.prototype, 'start', async () => {
@@ -181,7 +181,7 @@ test('R3: static mode registers the monitor before start as in 1.1.2, so the too
   assert.equal(http.records.length, 0);
 });
 
-test('R4: disabled monitoring returns the configuration error before any sign-in request', async (t) => {
+test('J4: disabled monitoring returns the configuration error before any sign-in request', async (t) => {
   t.mock.method(console, 'error', () => undefined);
   const monitoring = await importFreshMonitoringModule();
   const start = t.mock.method(TopicMonitor.prototype, 'start', async () => undefined);

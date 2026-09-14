@@ -46,6 +46,7 @@ const nodeFetchImplementation: HttpFetch = (url, request) =>
     headers: request.headers,
     body: request.body,
     signal: request.signal,
+    ...(request.redirect === undefined ? {} : { redirect: request.redirect }),
   });
 
 export interface MattermostClientDependencies {

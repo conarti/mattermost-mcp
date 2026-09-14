@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { unlinkSync, writeFileSync } from 'node:fs';
 import { DEFAULT_AUTHENTICATION_TIMINGS, PROCESS_EXIT_EVENT } from '../../src/authentication/constants.js';
@@ -8,7 +9,12 @@ import {
   systemClock,
 } from '../../src/authentication/runtime.js';
 import { resolveStatePaths } from '../../src/authentication/stateFiles.js';
-import { EXIT_HANDLER_FIXTURE_MODES, FIXTURE_OUTPUT_LINES, OUTPUT_LINE_SEPARATOR } from './fixtureConstants.js';
+import {
+  EXIT_HANDLER_FIXTURE_MODES,
+  FIXTURE_OUTPUT_LINES,
+  MAKE_FIFO_COMMAND,
+  OUTPUT_LINE_SEPARATOR,
+} from './fixtureConstants.js';
 
 const [homeDirectory, markerPath, mode] = process.argv.slice(2);
 const paths = resolveStatePaths(homeDirectory);
@@ -44,6 +50,10 @@ process.stdout.write(`${FIXTURE_OUTPUT_LINES.READY}${OUTPUT_LINE_SEPARATOR}`, ()
       paths.loginLockBreakPath,
       JSON.stringify({ processId: process.pid, createdAtMilliseconds: Date.now(), nonce: randomUUID() }),
     );
+    process.exit(0);
+  } else if (mode === EXIT_HANDLER_FIXTURE_MODES.FIFO_BREAK) {
+    /* Без O_NONBLOCK чтение FIFO в синхронном обработчике exit ждало бы писателя вечно */
+    execFileSync(MAKE_FIFO_COMMAND, [paths.loginLockBreakPath]);
     process.exit(0);
   } else {
     process.stderr.write(`unknown exit handler fixture mode ${mode}\n`);

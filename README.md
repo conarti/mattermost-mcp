@@ -77,6 +77,8 @@ No manual installation is needed.
 - The shared Playwright cache (`~/Library/Caches/ms-playwright` on macOS) is not used: Playwright installations in other projects remove builds that no project references.
 - If the download fails, the error contains the reason and a manual command as a fallback, see [Browser sign-in problems](#browser-sign-in-problems).
 - On Linux without the system libraries for Chromium, a one-time `install-deps` command is needed, see [Browser sign-in problems](#browser-sign-in-problems).
+- Keep this package up to date: each release pins a Playwright version, and newer versions bring Chromium builds with security fixes.
+- Keep `PLAYWRIGHT_DOWNLOAD_HOST` on `https://` and do not disable TLS certificate checks for the download (for example with `NODE_TLS_REJECT_UNAUTHORIZED=0`): the downloaded Chromium later holds your Mattermost session.
 
 ### What is stored where
 
@@ -87,6 +89,13 @@ Everything lives in `~/.config/mattermost-mcp/` (permissions 0700):
 - `token`: the session token (permissions 0600), bound to the server address.
 - `login.lock` and `login.lock.break`: short-lived lock files that let several server processes share one sign-in window.
 - `tmp/`: temporary files of the Chromium download, removed after the installation.
+
+The server refuses to use the directory if `~/.config` or your home directory belongs to another user or is writable by group or others without the sticky bit, see `[STATE_DIRECTORY_UNSAFE]` in [Browser sign-in problems](#browser-sign-in-problems).
+
+### Security of the sign-in window
+
+- The Chromium window runs with the Chromium sandbox enabled, because it renders Mattermost content written by other users. Set `MATTERMOST_MCP_DISABLE_CHROMIUM_SANDBOX=1` in the `env` of the MCP server entry only if the sandbox is unavailable on your system (`[BROWSER_SANDBOX_UNAVAILABLE]`). The server then logs a warning each time it opens the window.
+- Use an `https://` address in `MATTERMOST_URL`. With `http://` and a host other than `localhost`, `127.0.0.1` or `[::1]`, the server logs a warning at startup: the password typed into the sign-in window and the session token are sent without encryption.
 
 ### Resetting the session
 
@@ -106,7 +115,12 @@ Both commands are safe while the sign-in window is open.
 
 ### Several clients
 
-Claude Code, opencode and other clients on the same machine share one token file and one sign-in window. If several clients need sign-in at the same time, only one window opens, and all waiting calls continue after you sign in. Background topic monitoring never opens the window: it skips the run until a tool call has signed in.
+Claude Code, opencode and other clients on the same machine share one token file and one sign-in window. If several clients need sign-in at the same time, only one window opens, and all waiting calls continue after you sign in.
+
+Background topic monitoring never opens the window. When the server starts without a saved session:
+
+- If `monitoring.userId` or `monitoring.notificationChannelId` is not set, the monitor cannot look them up, and its schedule does not start. Call `mattermost_run_monitoring`: it signs in if needed, starts the schedule and runs monitoring once. Signing in through another tool does not start the schedule, so call `mattermost_run_monitoring` afterwards or restart the server.
+- If both are set, the schedule starts right away, and runs before the first sign-in are skipped with `[AUTHENTICATION_REQUIRED]` in the logs.
 
 ### opencode
 
@@ -408,13 +422,15 @@ If the error mentions an active `__dirlock`, another Chromium installation is st
 sudo npx playwright@1.63.0 install-deps chromium
 ```
 
+`[BROWSER_SANDBOX_UNAVAILABLE]` (Linux): Chromium cannot start its sandbox, for example because unprivileged user namespaces are disabled or the server runs in a container without them. Enable the sandbox for your user if you can. Only if that is not possible, set `MATTERMOST_MCP_DISABLE_CHROMIUM_SANDBOX=1` in the `env` of the MCP server entry and call the tool again.
+
 `[LOGIN_WINDOW_CLOSED]`, `[LOGIN_TIMEOUT]`, `[LOGIN_NOT_COMPLETED]`: the window was closed, sign-in took longer than 5 minutes, or sign-in in another client ended without a session. Call the tool again to open the window.
 
 `[LOGIN_PROFILE_BUSY]`: another Chromium window uses the sign-in profile. Close the other Mattermost sign-in window and call the tool again.
 
 `[AUTHENTICATION_REQUIRED]` in monitoring logs: background monitoring does not open the sign-in window. Call any Mattermost tool to sign in.
 
-`[STATE_DIRECTORY_UNSAFE]`: `~/.config/mattermost-mcp` is a symbolic link, is not a directory or belongs to another user. Remove or fix it and call the tool again.
+`[STATE_DIRECTORY_UNSAFE]`: `~/.config/mattermost-mcp` or one of its subdirectories is a symbolic link, is not a directory or belongs to another user, or `~/.config` or your home directory belongs to another user or is writable by group or others. Fix it as the error text says (for example `chmod go-w ~/.config`) and call the tool again.
 
 `[REQUEST_CANCELLED]`: the client cancelled the call, for example by its timeout, while the sign-in window was open. The request was not sent, so nothing was posted twice. Sign-in continues in the window, call the tool again after signing in.
 

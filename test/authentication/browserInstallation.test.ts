@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { getEventListeners } from 'node:events';
-import { existsSync, statSync } from 'node:fs';
-import { chmod, mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { existsSync, mkdtempSync, statSync } from 'node:fs';
+import { chmod, lstat, mkdir, mkdtemp, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
@@ -11,7 +11,9 @@ import {
   BrowserInstallerDependencies,
   buildInstallationEnvironment,
   createBrowserInstaller,
+  extractInstallationFailureReason,
   parseInstallationProgressLine,
+  redactProxyCredentials,
   redactUrlCredentials,
   resolvePlaywrightCliPath,
 } from '../../src/authentication/browserInstallation.js';
@@ -34,14 +36,16 @@ import {
 import { FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS, PERMISSION_BITS_MASK } from '../fixtures/fixtureConstants.js';
 
 const START_MILLISECONDS = 1_000_000_000_000;
-const BROWSERS_DIRECTORY = '/fake/state/browsers';
+/* Установщик создаёт папку сборок сам, поэтому она лежит во временной папке теста */
+const BROWSERS_ROOT_DIRECTORY = mkdtempSync(join(tmpdir(), 'mattermost-mcp-installer-browsers-'));
+const BROWSERS_DIRECTORY = join(BROWSERS_ROOT_DIRECTORY, 'state', 'browsers');
 const FAKE_CLI_PATH = '/fake/node_modules/playwright-core/cli.js';
 const FAKE_NODE_EXECUTABLE_PATH = '/fake/bin/node';
 const LOCKED_DIRECTORY_MODE = 0o500;
 const PROGRESS_BAR_WIDTH = 80;
 const MANUAL_COMMAND = buildChromiumInstallCommand(BROWSERS_DIRECTORY);
 
-const temporaryDirectories: string[] = [];
+const temporaryDirectories: string[] = [BROWSERS_ROOT_DIRECTORY];
 
 after(async () => {
   await Promise.all(temporaryDirectories.map((directory) => rm(directory, { recursive: true, force: true })));
@@ -110,6 +114,7 @@ async function createInstallerTestContext(
     onProgress?: (progress: BrowserInstallationProgress) => void;
     /** Журнал записывает сообщение и бросает исключение, если условие выполнено */
     loggerThrowsFor?: (message: string) => boolean;
+    environment?: NodeJS.ProcessEnv;
   } = {},
 ): Promise<InstallerTestContext> {
   const temporaryRootDirectory =
@@ -132,7 +137,7 @@ async function createInstallerTestContext(
     clock,
     spawnProcess: spawner.spawn,
     resolveCliPath: () => FAKE_CLI_PATH,
-    environment: { PATH: '/usr/bin', HTTPS_PROXY: 'http://proxy.test:3128' },
+    environment: options.environment ?? { PATH: '/usr/bin', HTTPS_PROXY: 'http://proxy.test:3128' },
     nodeExecutablePath: FAKE_NODE_EXECUTABLE_PATH,
     processEvents,
   };
@@ -258,13 +263,16 @@ test('R4: the installer is started once with the pinned arguments, pipes and a f
   await mkdir(leftoverDirectory);
   await writeFile(join(leftoverDirectory, 'partial.zip'), 'partial archive');
 
-  let observedAtLaunch: { temporaryDirectoryMode: number; leftoverExists: boolean } | undefined;
+  let observedAtLaunch:
+    | { temporaryDirectoryMode: number; browsersDirectoryMode: number; leftoverExists: boolean }
+    | undefined;
   const context = await createInstallerTestContext({
     temporaryRootDirectory,
     onLaunch: (launch) => {
       const temporaryDirectory = launch.options.env.TMPDIR ?? '';
       observedAtLaunch = {
         temporaryDirectoryMode: statSync(temporaryDirectory).mode & PERMISSION_BITS_MASK,
+        browsersDirectoryMode: statSync(BROWSERS_DIRECTORY).mode & PERMISSION_BITS_MASK,
         leftoverExists: existsSync(leftoverDirectory),
       };
     },
@@ -281,7 +289,11 @@ test('R4: the installer is started once with the pinned arguments, pipes and a f
   assert.ok(launch.options.env.TMPDIR?.startsWith(join(temporaryRootDirectory, 'installation-')));
   assert.equal(launch.options.env.PLAYWRIGHT_BROWSERS_PATH, BROWSERS_DIRECTORY);
   assert.equal(launch.options.env.HTTPS_PROXY, 'http://proxy.test:3128');
-  assert.deepEqual(observedAtLaunch, { temporaryDirectoryMode: PRIVATE_DIRECTORY_MODE, leftoverExists: false });
+  assert.deepEqual(observedAtLaunch, {
+    temporaryDirectoryMode: PRIVATE_DIRECTORY_MODE,
+    browsersDirectoryMode: PRIVATE_DIRECTORY_MODE,
+    leftoverExists: false,
+  });
 });
 
 test('R5: progress is reported from chunked output and success waits for the close event', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
@@ -483,10 +495,98 @@ test('R9: proxy credentials are redacted in the error text and in the log', { ti
   assert.equal(redactUrlCredentials('via http://user:p@ss@proxy.test:3128/path'), 'via http://***@proxy.test:3128/path');
   assert.equal(redactUrlCredentials('via http://:secret@proxy.test:3128'), 'via http://***@proxy.test:3128');
   assert.equal(redactUrlCredentials('via http://token@proxy.test'), 'via http://***@proxy.test');
+  assert.equal(redactUrlCredentials('proxy http://user:pa/ss@proxy:3128 failed'), 'proxy http://***@proxy:3128 failed');
+  assert.equal(redactUrlCredentials('proxy http://user:pa#ss@proxy:3128 failed'), 'proxy http://***@proxy:3128 failed');
+  assert.equal(redactUrlCredentials("proxy: 'socks5://u:p@h:1080'"), "proxy: 'socks5://***@h:1080'");
+  /* Жадная замена скрывает и часть адреса без userinfo, если в слове дальше есть @: лишнее скрытие безопаснее утечки */
   assert.equal(
     redactUrlCredentials('from https://cdn.playwright.dev/builds/@scope/chrome.zip?user=a@b'),
-    'from https://cdn.playwright.dev/builds/@scope/chrome.zip?user=a@b',
+    'from https://***@b',
   );
+});
+
+test('R21: proxy credentials from the installer environment are redacted even without a scheme in the output', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
+  const environment: NodeJS.ProcessEnv = {
+    HTTPS_PROXY: 'http://user:pa/ss@proxy.test:3128',
+    http_proxy: 'user:secret@proxy.test:3128',
+    ALL_PROXY: 'socks5://proxy.test:1080',
+    all_proxy: '@proxy.test:1080',
+    NO_PROXY: 'user:no-proxy-value@',
+  };
+  assert.equal(
+    redactProxyCredentials('tunneling via http://user:pa/ss@proxy.test:3128 and user:secret@proxy.test:3128', environment),
+    'tunneling via http://***@proxy.test:3128 and ***@proxy.test:3128',
+  );
+  assert.equal(
+    redactProxyCredentials('user:no-proxy-value@ stays, a user named user stays', environment),
+    'user:no-proxy-value@ stays, a user named user stays',
+  );
+  assert.equal(redactProxyCredentials('nothing to hide', {}), 'nothing to hide');
+  assert.equal(
+    redactProxyCredentials('connect via user:secret@proxy:3128 failed', { HTTP_PROXY: 'user:secret@proxy:3128' }),
+    'connect via ***@proxy:3128 failed',
+  );
+  assert.equal(
+    redactProxyCredentials('connect via http://user:pa/ss@proxy:3128 failed', { https_proxy: 'http://user:pa/ss@proxy:3128' }),
+    'connect via http://***@proxy:3128 failed',
+  );
+
+  const reason = extractInstallationFailureReason(
+    {
+      stdoutLines: ['Failed to install browsers', 'Error: Download failed via user:secret@proxy.test:3128'],
+      stderrLines: ['Error: tunneling socket could not be established, proxy http://user:pa/ss@proxy.test:3128'],
+      exitDescription: 'exit code 1',
+    },
+    environment,
+  );
+  assert.equal(reason.includes('secret'), false, reason);
+  assert.equal(reason.includes('pa/ss'), false, reason);
+  assert.ok(reason.includes('***@proxy.test:3128'), reason);
+
+  const context = await createInstallerTestContext({
+    environment: { PATH: '/usr/bin', https_proxy: 'user:secret-password@proxy.test:3128' },
+  });
+  const installation = context.start();
+  const { child } = await context.spawner.waitForLaunch();
+  child.writeStderr('Error: proxy user:secret-password@proxy.test:3128 refused the connection\n');
+  child.emitExit(1, null);
+  const error = await captureInstallationError(installation.promise);
+  assert.ok(error.message.includes('proxy ***@proxy.test:3128 refused the connection'), error.message);
+  assert.equal(error.message.includes('secret-password'), false);
+  assert.equal(context.messages.some((message) => message.includes('secret-password')), false);
+});
+
+test('R22: failures to prepare the installer directories end with the manual command or STATE_DIRECTORY_UNSAFE', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
+  const blockingRoot = await mkdtemp(join(tmpdir(), 'mattermost-mcp-installer-blocked-'));
+  temporaryDirectories.push(blockingRoot);
+  const blockingFile = join(blockingRoot, 'regular-file');
+  await writeFile(blockingFile, '');
+
+  const temporaryRootUnderFile = join(blockingFile, 'tmp');
+  const preparationFailure = await createInstallerTestContext({ temporaryRootDirectory: temporaryRootUnderFile });
+  /* rm с force на пути внутри файла бросает ENOTDIR, а сам путь удалится вместе с blockingRoot */
+  temporaryDirectories.splice(temporaryDirectories.indexOf(temporaryRootUnderFile), 1);
+  const preparationError = await captureInstallationError(preparationFailure.start().promise);
+  assert.equal(
+    preparationError.message,
+    `[BROWSER_INSTALLATION_FAILED] could not prepare installer temporary directory ${temporaryRootUnderFile} (ENOTDIR). Run manually: ${MANUAL_COMMAND}`,
+  );
+  assert.equal(preparationFailure.spawner.launches.length, 0);
+
+  const linkTarget = join(blockingRoot, 'link-target');
+  await mkdir(linkTarget, { mode: 0o755 });
+  const linkedTemporaryRoot = join(blockingRoot, 'linked-tmp');
+  await symlink(linkTarget, linkedTemporaryRoot);
+  const linked = await createInstallerTestContext({ temporaryRootDirectory: linkedTemporaryRoot });
+  await assert.rejects(linked.start().promise, (error: unknown) => {
+    assert.ok(error instanceof MattermostAuthenticationError);
+    assert.equal(error.code, AUTHENTICATION_ERROR_CODES.STATE_DIRECTORY_UNSAFE);
+    assert.ok(error.message.includes(`${linkedTemporaryRoot} is a symbolic link`), error.message);
+    return true;
+  });
+  assert.equal(linked.spawner.launches.length, 0);
+  assert.equal((await lstat(linkTarget)).mode & PERMISSION_BITS_MASK, 0o755);
+  assert.deepEqual(await readdir(linkTarget), []);
 });
 
 test('R10: the installer is terminated after 600 s with SIGTERM and then SIGKILL', { timeout: FAKE_CLOCK_TEST_TIMEOUT_MILLISECONDS }, async () => {
@@ -578,7 +678,10 @@ test('R12: a spawn error fails the installation and later errors are only logged
   assert.doesNotThrow(() => child.emitError(spawnError));
   const error = await captureInstallationError(installation.promise);
 
-  assert.ok(error.message.includes('could not start installer: ENOENT'));
+  assert.equal(
+    error.message,
+    `[BROWSER_INSTALLATION_FAILED] could not start installer: ENOENT. Run manually: ${MANUAL_COMMAND}`,
+  );
   assert.ok(context.messages.includes('installer process error (ENOENT)'));
   assert.equal(context.processEvents.listenersOf('exit').length, 0);
   assert.equal(child.listenerCount('error'), 0);

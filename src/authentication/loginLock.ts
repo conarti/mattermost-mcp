@@ -18,14 +18,16 @@
  * не догонят её время.
  */
 import { randomUUID } from 'node:crypto';
-import { linkSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
-import { link, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { closeSync, fstatSync, linkSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { constants, link, open, rename, unlink, writeFile } from 'node:fs/promises';
+import type { FileHandle } from 'node:fs/promises';
 import {
   AuthenticationTimings,
   EXCLUSIVE_CREATE_FLAG,
   FILE_SYSTEM_ERROR_CODES,
   PRIVATE_FILE_MODE,
   PROCESS_EXIT_EVENT,
+  SYMBOLIC_LINK_LOOP_ERROR_CODE,
   TEMPORARY_FILE_EXTENSION,
   TEXT_FILE_ENCODING,
   UNKNOWN_ERROR_CODE,
@@ -83,6 +85,9 @@ interface LockOwnership {
 const MILLISECONDS_IN_SECOND = 1_000;
 /* process.kill принимает только 32-битный PID со знаком, на большем он бросает не ESRCH, и процесс выглядел бы живым */
 const MAXIMUM_PROCESS_ID = 0x7fffffff;
+const LOCK_FILE_OPEN_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
+/* Пустая строка не разбирается как запись */
+const UNREADABLE_LOCK_FILE_CONTENT = '';
 
 /* Набор общий для всех экземпляров в процессе, иначе чужой экземпляр счёл бы живую свою запись брошенной */
 const ownedLockNonces = new Set<string>();
@@ -130,14 +135,38 @@ function describeErrorCode(error: unknown): string {
   return getErrorCode(error) ?? UNKNOWN_ERROR_CODE;
 }
 
+/**
+ * FIFO, symlink или папка на месте файла блокировки читаются как нечитаемая запись: такую login.lock снимают как
+ * устаревшую, а login.lock.break как брошенную. O_NONBLOCK не даёт открытию FIFO повесить вызов
+ */
 async function readOptionalFile(filePath: string): Promise<string | undefined> {
+  let handle: FileHandle;
   try {
-    return await readFile(filePath, TEXT_FILE_ENCODING);
+    handle = await open(filePath, LOCK_FILE_OPEN_FLAGS);
   } catch (error) {
-    if (getErrorCode(error) === FILE_SYSTEM_ERROR_CODES.NOT_FOUND) {
+    const errorCode = getErrorCode(error);
+    if (errorCode === FILE_SYSTEM_ERROR_CODES.NOT_FOUND) {
       return undefined;
     }
+    if (errorCode === SYMBOLIC_LINK_LOOP_ERROR_CODE) {
+      return UNREADABLE_LOCK_FILE_CONTENT;
+    }
     throw error;
+  }
+  try {
+    return (await handle.stat()).isFile() ? await handle.readFile(TEXT_FILE_ENCODING) : UNREADABLE_LOCK_FILE_CONTENT;
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
+}
+
+/** Синхронный вариант readOptionalFile для обработчика exit; отсутствующий файл и symlink дают исключение */
+function readLockFileSync(filePath: string): string {
+  const descriptor = openSync(filePath, LOCK_FILE_OPEN_FLAGS);
+  try {
+    return fstatSync(descriptor).isFile() ? readFileSync(descriptor, TEXT_FILE_ENCODING) : UNREADABLE_LOCK_FILE_CONTENT;
+  } finally {
+    closeSync(descriptor);
   }
 }
 
@@ -457,7 +486,7 @@ export class LoginLock {
       } catch {
         /* Процесс мог прервать собственную критическую секцию снятия или release */
         try {
-          ownsLockBreak = parseRecord(readFileSync(loginLockBreakPath, TEXT_FILE_ENCODING))?.processId === process.pid;
+          ownsLockBreak = parseRecord(readLockFileSync(loginLockBreakPath))?.processId === process.pid;
         } catch {
           ownsLockBreak = false;
         }
@@ -472,7 +501,7 @@ export class LoginLock {
         return;
       }
       try {
-        if (parseRecord(readFileSync(loginLockPath, TEXT_FILE_ENCODING))?.nonce === ownership.record.nonce) {
+        if (parseRecord(readLockFileSync(loginLockPath))?.nonce === ownership.record.nonce) {
           unlinkSync(loginLockPath);
         }
       } catch {

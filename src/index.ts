@@ -9,7 +9,7 @@ import { tools } from "./tools/index.js";
 import { startAndRegisterTopicMonitor } from "./tools/monitoring.js";
 import { createCallToolHandler } from "./callToolHandler.js";
 import { MattermostClient } from "./client.js";
-import { loadConfig, resolveAuthenticationMode } from "./config.js";
+import { describeUnencryptedMattermostUrl, loadConfig, resolveAuthenticationMode } from "./config.js";
 import { TopicMonitor } from "./monitor/index.js";
 import {
   AUTHENTICATION_MODES,
@@ -34,6 +34,10 @@ async function main() {
     console.error(
       `${AUTHENTICATION_MODE_LOG_PREFIX} ${AUTHENTICATION_MODES.BROWSER} (state directory ${resolveStatePaths().stateDirectory})`
     );
+    const unencryptedUrlWarning = describeUnencryptedMattermostUrl(config.mattermostUrl);
+    if (unencryptedUrlWarning !== undefined) {
+      authenticationLogger(unencryptedUrlWarning);
+    }
   } else {
     console.error(`${AUTHENTICATION_MODE_LOG_PREFIX} ${AUTHENTICATION_MODES.STATIC}`);
   }

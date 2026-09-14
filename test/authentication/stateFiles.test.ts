@@ -16,6 +16,7 @@ import {
   StatePaths,
   createFileTokenStore,
   ensurePrivateDirectory,
+  ensureStateDirectory,
   resolveStatePaths,
 } from '../../src/authentication/stateFiles.js';
 import { PERMISSION_BITS_MASK } from '../fixtures/fixtureConstants.js';
@@ -24,6 +25,9 @@ const SITE_URL = 'https://chat.example.test';
 const OTHER_SITE_URL = 'https://other.example.test';
 const WIDE_FILE_MODE = 0o644;
 const WIDE_DIRECTORY_MODE = 0o755;
+const SHARED_WRITABLE_DIRECTORY_MODE = 0o777;
+const SHARED_WRITABLE_STICKY_DIRECTORY_MODE = 0o1777;
+const GROUP_WRITABLE_UMASK = 0o002;
 const SPECIAL_FILE_TEST_TIMEOUT_MILLISECONDS = 5_000;
 const MAKE_FIFO_COMMAND = 'mkfifo';
 
@@ -279,4 +283,56 @@ test('S9: token write removes temporary token files of dead processes only', asy
   assert.ok(!entries.includes(abandonedFileName));
   assert.deepEqual(entries.filter((entry) => entry.endsWith(TEMPORARY_FILE_EXTENSION)).sort(), [...keptFileNames].sort());
   assert.equal(await store.readToken(SITE_URL), 'secret-token-0009');
+});
+
+test('S10: a parent of the state directory writable by group or others without the sticky bit is rejected', async () => {
+  const homeDirectory = await createTemporaryHome();
+  const paths = resolveStatePaths(homeDirectory);
+  const configDirectory = join(homeDirectory, '.config');
+  const store = createFileTokenStore(paths, createLogSpy().logger);
+
+  for (const unsafeDirectory of [homeDirectory, configDirectory]) {
+    await mkdir(configDirectory, { recursive: true });
+    await chmod(unsafeDirectory, SHARED_WRITABLE_DIRECTORY_MODE);
+    try {
+      await assert.rejects(ensureStateDirectory(paths), (error: unknown) => {
+        assert.ok(error instanceof MattermostAuthenticationError);
+        assert.equal(error.code, AUTHENTICATION_ERROR_CODES.STATE_DIRECTORY_UNSAFE);
+        assert.ok(
+          error.message.includes(`parent directory ${unsafeDirectory} is writable by group or others`),
+          error.message,
+        );
+        assert.ok(error.message.includes(`chmod go-w ${unsafeDirectory}`), error.message);
+        return true;
+      });
+      await assert.rejects(store.writeToken(SITE_URL, 'secret-token-0010'), (error: unknown) => {
+        assert.ok(error instanceof MattermostAuthenticationError);
+        assert.equal(error.code, AUTHENTICATION_ERROR_CODES.STATE_DIRECTORY_UNSAFE);
+        assert.ok(!error.message.includes('secret-token-0010'));
+        return true;
+      });
+      assert.deepEqual(await readdir(configDirectory), []);
+
+      await chmod(unsafeDirectory, SHARED_WRITABLE_STICKY_DIRECTORY_MODE);
+      await ensureStateDirectory(paths);
+      assert.equal(await readPermissionBits(paths.stateDirectory), PRIVATE_DIRECTORY_MODE);
+      await rm(paths.stateDirectory, { recursive: true });
+    } finally {
+      await chmod(unsafeDirectory, WIDE_DIRECTORY_MODE);
+    }
+  }
+
+  await chmod(homeDirectory, 0o750);
+  await chmod(configDirectory, WIDE_DIRECTORY_MODE);
+  await store.writeToken(SITE_URL, 'secret-token-0011');
+  assert.equal(await store.readToken(SITE_URL), 'secret-token-0011');
+
+  const groupWritableUmaskHome = await createTemporaryHome();
+  const previousUmask = process.umask(GROUP_WRITABLE_UMASK);
+  try {
+    await ensureStateDirectory(resolveStatePaths(groupWritableUmaskHome));
+  } finally {
+    process.umask(previousUmask);
+  }
+  assert.equal(await readPermissionBits(join(groupWritableUmaskHome, '.config')), WIDE_DIRECTORY_MODE);
 });
