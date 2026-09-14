@@ -27,6 +27,7 @@ import {
   setTopicMonitorInstance
 } from "./monitoring.js";
 import { MattermostClient } from "../client.js";
+import { BACKGROUND_CALL_CONTEXT, RequestCallContext } from "../authentication/session.js";
 
 // Export all tool definitions
 export const tools: Tool[] = [
@@ -61,7 +62,8 @@ export const toolHandlers: Record<string, Function> = {
 export async function executeTool(
   client: MattermostClient,
   toolName: string,
-  args: any
+  args: any,
+  callContext: RequestCallContext = BACKGROUND_CALL_CONTEXT
 ) {
   const handler = toolHandlers[toolName];
   
@@ -80,7 +82,7 @@ export async function executeTool(
   }
   
   try {
-    return await handler(client, args);
+    return await handler(client.withCallContext(callContext), args);
   } catch (error) {
     console.error(`Error executing tool ${toolName}:`, error);
     return {

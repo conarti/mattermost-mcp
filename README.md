@@ -53,6 +53,113 @@ npm run build
 npm start
 ```
 
+## Browser sign-in (no token)
+
+`MATTERMOST_TOKEN` is optional. Without a token the server signs in to Mattermost through a visible Chromium window and keeps the session token for you. With `MATTERMOST_TOKEN` set, the server works as before (static mode): no browser window, no Chromium download, and `~/.config/mattermost-mcp` is not created.
+
+### First sign-in
+
+1. Configure the server with `MATTERMOST_URL` and `MATTERMOST_TEAM_ID` only, without a token (see [Claude Code Integration](#claude-code-integration) and [opencode](#opencode) below).
+2. Call any Mattermost tool. The server opens a Chromium window with the Mattermost login page.
+3. Sign in the way you usually do (password, SSO, MFA). You have up to 5 minutes.
+4. The window closes by itself as soon as the session is valid, and the tool call returns its result.
+
+While the call waits, the server sends progress notifications every 10 seconds, so clients that show MCP progress display the current step. The window opens only from a tool call: never at server startup and never from background monitoring.
+
+### Chromium is downloaded automatically
+
+No manual installation is needed.
+
+- On the first sign-in the server downloads Chromium and ffmpeg for Playwright 1.63.0 (about 183 MiB on macOS arm64) into `~/.config/mattermost-mcp/browsers`. The client shows the progress as `Downloading Chromium for Mattermost sign-in: 40% of 182.1 MiB`, and for the small ffmpeg archive that follows as `Downloading Chromium for Mattermost sign-in: FFmpeg 50% of 1 MiB`.
+- The first call takes longer: the download is limited to 10 minutes, and the 5 minutes for sign-in start after the download has finished.
+- After an update of this package to a version with another Playwright version, the matching Chromium build is downloaded the same way.
+- Behind a proxy or with a download mirror, set `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`, `PLAYWRIGHT_DOWNLOAD_HOST` or `PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT` in the `env` of the MCP server entry.
+- The shared Playwright cache (`~/Library/Caches/ms-playwright` on macOS) is not used: Playwright installations in other projects remove builds that no project references.
+- If the download fails, the error contains the reason and a manual command as a fallback, see [Browser sign-in problems](#browser-sign-in-problems).
+- On Linux without the system libraries for Chromium, a one-time `install-deps` command is needed, see [Browser sign-in problems](#browser-sign-in-problems).
+- Keep this package up to date: each release pins a Playwright version, and newer versions bring Chromium builds with security fixes.
+- Keep `PLAYWRIGHT_DOWNLOAD_HOST` on `https://` and do not disable TLS certificate checks for the download (for example with `NODE_TLS_REJECT_UNAUTHORIZED=0`): the downloaded Chromium later holds your Mattermost session.
+
+### What is stored where
+
+Everything lives in `~/.config/mattermost-mcp/` (permissions 0700):
+
+- `browsers/`: Chromium builds for the sign-in window.
+- `profile/`: the Chromium profile with the Mattermost session. It is as sensitive as the token because cookies in it are not encrypted. Exclude it from dotfiles sync and backups.
+- `token`: the session token (permissions 0600), bound to the server address.
+- `login.lock` and `login.lock.break`: short-lived lock files that let several server processes share one sign-in window.
+- `tmp/`: temporary files of the Chromium download, removed after the installation.
+
+The server refuses to use the directory if `~/.config` or your home directory belongs to another user or is writable by group or others without the sticky bit, see `[STATE_DIRECTORY_UNSAFE]` in [Browser sign-in problems](#browser-sign-in-problems).
+
+### Security of the sign-in window
+
+- The Chromium window runs with the Chromium sandbox enabled, because it renders Mattermost content written by other users. Set `MATTERMOST_MCP_DISABLE_CHROMIUM_SANDBOX=1` in the `env` of the MCP server entry only if the sandbox is unavailable on your system (`[BROWSER_SANDBOX_UNAVAILABLE]`). The server then logs a warning each time it opens the window.
+- Use an `https://` address in `MATTERMOST_URL`. With `http://` and a host other than `localhost`, `127.0.0.1` or `[::1]`, the server logs a warning at startup: the password typed into the sign-in window and the session token are sent without encryption.
+
+### Resetting the session
+
+Remove only the session (the next tool call opens the sign-in window again):
+
+```bash
+rm -rf ~/.config/mattermost-mcp/profile ~/.config/mattermost-mcp/token
+```
+
+Remove everything, including Chromium (it is downloaded again on the next sign-in):
+
+```bash
+rm -rf ~/.config/mattermost-mcp
+```
+
+Both commands are safe while the sign-in window is open.
+
+### Several clients
+
+Claude Code, opencode and other clients on the same machine share one token file and one sign-in window. If several clients need sign-in at the same time, only one window opens, and all waiting calls continue after you sign in.
+
+Background topic monitoring never opens the window. When the server starts without a saved session:
+
+- If `monitoring.userId` or `monitoring.notificationChannelId` is not set, the monitor cannot look them up, and its schedule does not start. Call `mattermost_run_monitoring`: it signs in if needed, starts the schedule and runs monitoring once. Signing in through another tool does not start the schedule, so call `mattermost_run_monitoring` afterwards or restart the server.
+- If both are set, the schedule starts right away, and runs before the first sign-in are skipped with `[AUTHENTICATION_REQUIRED]` in the logs.
+
+### opencode
+
+Example of an opencode entry without a token:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "mattermost": {
+      "type": "local",
+      "command": ["npx", "-y", "@conarti/mattermost-mcp@latest"],
+      "environment": {
+        "MATTERMOST_URL": "https://your-mattermost.com/api/v4",
+        "MATTERMOST_TEAM_ID": "your-team-id"
+      },
+      "timeout": 360000
+    }
+  },
+  "experimental": {
+    "mcp_timeout": 360000
+  }
+}
+```
+
+### Client timeouts
+
+The first tool call can take several minutes: the Chromium download and then up to 5 minutes of sign-in. Progress notifications every 10 seconds keep the call alive in clients that pass a `progressToken` and reset their timeout on progress.
+
+- opencode: set `mcp.mattermost.timeout` and `experimental.mcp_timeout` to `360000` (6 minutes) as in the example above. Some opencode versions apply a hard request timeout that progress notifications do not extend.
+- A client that does not pass a `progressToken` can cancel the first call during the Chromium download. The download then stops and starts from the beginning on the next call. Raise the client timeout, or run the manual installation command from [Browser sign-in problems](#browser-sign-in-problems) once.
+
+### Limitations
+
+- One Mattermost server per operating system user. A token file of another server is ignored. The addresses are normalized before the comparison, so `/api/v4`, a trailing slash and the letter case of the host do not matter.
+- If clients with different `MATTERMOST_URL` values sign in at the same time, the waiting call gets `LOGIN_NOT_COMPLETED`, and the window for the second server opens only when you call the tool again. Its token replaces the token of the first server, and the first server opens the window again on its next call.
+- Do not enable `DEBUG=pw:*` for the server: Playwright debug output prints cookies.
+- Windows is not supported.
+
 ## Configuration
 
 The server supports multiple configuration methods with the following priority (highest to lowest):
@@ -78,8 +185,10 @@ The server supports multiple configuration methods with the following priority (
 | Variable | Description |
 |----------|-------------|
 | `MATTERMOST_URL` | Mattermost API URL |
-| `MATTERMOST_TOKEN` | Mattermost personal access token |
+| `MATTERMOST_TOKEN` | Mattermost personal access token (optional: without it the server uses [browser sign-in](#browser-sign-in-no-token)) |
 | `MATTERMOST_TEAM_ID` | Mattermost team ID |
+| `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY` | Proxy for the automatic Chromium download in browser sign-in |
+| `PLAYWRIGHT_DOWNLOAD_HOST`, `PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT` | Mirror and connection timeout for the automatic Chromium download |
 
 ### Configuration File
 
@@ -132,6 +241,25 @@ Or using a config file:
   }
 }
 ```
+
+Or without a token, with [browser sign-in](#browser-sign-in-no-token):
+
+```json
+{
+  "mcpServers": {
+    "mattermost": {
+      "command": "npx",
+      "args": ["-y", "@conarti/mattermost-mcp@latest"],
+      "env": {
+        "MATTERMOST_URL": "https://your-mattermost.com/api/v4",
+        "MATTERMOST_TEAM_ID": "your-team-id"
+      }
+    }
+  }
+}
+```
+
+The first tool call opens the sign-in window and, on the first sign-in, downloads Chromium.
 
 ## Features
 
@@ -260,18 +388,51 @@ curl -H "Authorization: Bearer YOUR_TOKEN" \
 ```
 Missing required configuration:
   - mattermostUrl (--url or MATTERMOST_URL)
-  - token (--token or MATTERMOST_TOKEN)
   - teamId (--team-id or MATTERMOST_TEAM_ID)
 ```
 
-Make sure you've provided all required configuration via CLI arguments, environment variables, or config file.
+Make sure you've provided the Mattermost URL and team ID via CLI arguments, environment variables, or config file. The token is not required: without it the server uses [browser sign-in](#browser-sign-in-no-token).
 
 ### Permission Errors
 
 Verify that:
-1. Your personal access token has the necessary permissions
-2. The token is correctly set
+1. The Mattermost user has the necessary permissions: the owner of the personal access token, or the user you signed in as in the browser window
+2. With a token, the token is correctly set
 3. The Mattermost URL and team ID are correct
+
+To sign in as another user in browser sign-in, [reset the session](#resetting-the-session) and call a tool again.
+
+### Browser sign-in problems
+
+Error messages start with a code in brackets.
+
+`[BROWSER_INSTALLATION_FAILED]`: the automatic Chromium download failed. The error contains the reason, for example a proxy or network error. Fix the reason and call the tool again. As a fallback, install Chromium manually once:
+
+```bash
+PLAYWRIGHT_BROWSERS_PATH=~/.config/mattermost-mcp/browsers npx playwright@1.63.0 install chromium --no-shell
+```
+
+When you run this command manually, a framed `WARNING: It looks like you are running 'npx playwright install' without first installing your project's dependencies` is expected and can be ignored.
+
+If the error mentions an active `__dirlock`, another Chromium installation is still running, for example started by another client: wait for it and call the tool again. If no installation is running, the file stayed after a crash, and you can remove it with the command from the error text.
+
+`[BROWSER_SYSTEM_DEPENDENCIES_MISSING]` (Linux): Chromium was downloaded but cannot start without system libraries. Install them once:
+
+```bash
+sudo npx playwright@1.63.0 install-deps chromium
+```
+
+`[BROWSER_SANDBOX_UNAVAILABLE]` (Linux): Chromium cannot start its sandbox, for example because unprivileged user namespaces are disabled or the server runs in a container without them. Enable the sandbox for your user if you can. Only if that is not possible, set `MATTERMOST_MCP_DISABLE_CHROMIUM_SANDBOX=1` in the `env` of the MCP server entry and call the tool again.
+
+`[LOGIN_WINDOW_CLOSED]`, `[LOGIN_TIMEOUT]`, `[LOGIN_NOT_COMPLETED]`: the window was closed, sign-in took longer than 5 minutes, or sign-in in another client ended without a session. Call the tool again to open the window.
+
+`[LOGIN_PROFILE_BUSY]`: another Chromium window uses the sign-in profile. Close the other Mattermost sign-in window and call the tool again.
+
+`[AUTHENTICATION_REQUIRED]` in monitoring logs: background monitoring does not open the sign-in window. Call any Mattermost tool to sign in.
+
+`[STATE_DIRECTORY_UNSAFE]`: `~/.config/mattermost-mcp` or one of its subdirectories is a symbolic link, is not a directory or belongs to another user, or `~/.config` or your home directory belongs to another user or is writable by group or others. Fix it as the error text says (for example `chmod go-w ~/.config`) and call the tool again.
+
+`[REQUEST_CANCELLED]`: the client cancelled the call, for example by its timeout, while the sign-in window was open. The request was not sent, so nothing was posted twice. Sign-in continues in the window, call the tool again after signing in.
 
 ## License
 

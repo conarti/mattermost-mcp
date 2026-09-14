@@ -1,6 +1,19 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
+import {
+  AUTHENTICATION_MODES,
+  BROWSERS_DIRECTORY_NAME,
+  CHROMIUM_INSTALL_ARGUMENTS,
+  CONFIG_DIRECTORY_NAME,
+  HTTP_PROTOCOL,
+  LOOPBACK_HOSTNAMES,
+  PLAYWRIGHT_BROWSERS_PATH_VARIABLE,
+  PLAYWRIGHT_NPX_PACKAGE,
+  PROFILE_DIRECTORY_NAME,
+  STATE_DIRECTORY_NAME,
+  TOKEN_FILE_NAME,
+} from './authentication/constants.js';
 
 // Get the directory name of the current module
 const __filename = fileURLToPath(import.meta.url);
@@ -61,6 +74,7 @@ function parseCliArgs(): Record<string, string> {
  * Display help message and exit
  */
 export function showHelp(): void {
+  const stateDirectory = `~/${CONFIG_DIRECTORY_NAME}/${STATE_DIRECTORY_NAME}`;
   const help = `
 Mattermost MCP Server
 
@@ -70,7 +84,7 @@ USAGE:
 
 OPTIONS:
   --url <url>          Mattermost API URL (e.g., https://mattermost.example.com/api/v4)
-  --token <token>      Mattermost personal access token
+  --token <token>      Mattermost personal access token (optional, see BROWSER SIGN-IN)
   --team-id <id>       Mattermost team ID
   --run-monitoring     Run topic monitoring immediately on startup
   --exit-after-monitoring  Exit after running monitoring (use with --run-monitoring)
@@ -78,8 +92,20 @@ OPTIONS:
 
 ENVIRONMENT VARIABLES:
   MATTERMOST_URL       Mattermost API URL
-  MATTERMOST_TOKEN     Mattermost personal access token
+  MATTERMOST_TOKEN     Mattermost personal access token (optional, see BROWSER SIGN-IN)
   MATTERMOST_TEAM_ID   Mattermost team ID
+
+BROWSER SIGN-IN (no token):
+  Without a token the server signs in to Mattermost through a visible Chromium window.
+  The window opens on the first tool call that needs sign-in and waits up to 5 minutes.
+  The session token, browser profile and Chromium builds are kept in ${stateDirectory}.
+  On the first sign-in Chromium (about 150 MiB) is downloaded automatically into
+  ${stateDirectory}/${BROWSERS_DIRECTORY_NAME}. If the download fails, install it manually:
+    ${PLAYWRIGHT_BROWSERS_PATH_VARIABLE}=${stateDirectory}/${BROWSERS_DIRECTORY_NAME} npx ${PLAYWRIGHT_NPX_PACKAGE} ${CHROMIUM_INSTALL_ARGUMENTS.join(' ')}
+  Reset the session only:
+    rm -rf ${stateDirectory}/${PROFILE_DIRECTORY_NAME} ${stateDirectory}/${TOKEN_FILE_NAME}
+  Reset everything (Chromium is downloaded again on the next sign-in):
+    rm -rf ${stateDirectory}
 
 CONFIGURATION FILES (checked in order):
   1. config.local.json  (for local overrides, gitignored)
@@ -109,6 +135,21 @@ CLAUDE CODE INTEGRATION:
         "env": {
           "MATTERMOST_URL": "https://your-mattermost.com/api/v4",
           "MATTERMOST_TOKEN": "your-token",
+          "MATTERMOST_TEAM_ID": "your-team-id"
+        }
+      }
+    }
+  }
+
+  Browser sign-in without a token:
+
+  {
+    "mcpServers": {
+      "mattermost": {
+        "command": "npx",
+        "args": ["-y", "@conarti/mattermost-mcp"],
+        "env": {
+          "MATTERMOST_URL": "https://your-mattermost.com/api/v4",
           "MATTERMOST_TEAM_ID": "your-team-id"
         }
       }
@@ -207,17 +248,39 @@ export function loadConfig(): Config {
   return config;
 }
 
+export type AuthenticationMode = typeof AUTHENTICATION_MODES[keyof typeof AUTHENTICATION_MODES];
+
+/**
+ * Предупреждение для браузерного входа по http на хост вне loopback: пароль в окне и токен идут без шифрования.
+ * @returns текст предупреждения или undefined, если адрес безопасен или не разбирается
+ */
+export function describeUnencryptedMattermostUrl(mattermostUrl: string): string | undefined {
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(mattermostUrl);
+  } catch {
+    return undefined;
+  }
+  const loopbackHostnames: readonly string[] = LOOPBACK_HOSTNAMES;
+  if (parsedUrl.protocol !== HTTP_PROTOCOL || loopbackHostnames.includes(parsedUrl.hostname)) {
+    return undefined;
+  }
+  return `MATTERMOST_URL uses http:// for ${parsedUrl.hostname}: the password entered in the sign-in window and the session token are sent without encryption. Use https://.`;
+}
+
+/** Та же проверка истинности токена, что была в validateConfig: любой непустой токен включает статический режим */
+export function resolveAuthenticationMode(config: Config): AuthenticationMode {
+  return config.token ? AUTHENTICATION_MODES.STATIC : AUTHENTICATION_MODES.BROWSER;
+}
+
 /**
  * Helper function to validate config
  */
-function validateConfig(config: Config): void {
+export function validateConfig(config: Config): void {
   const missing: string[] = [];
 
   if (!config.mattermostUrl) {
     missing.push('mattermostUrl (--url or MATTERMOST_URL)');
-  }
-  if (!config.token) {
-    missing.push('token (--token or MATTERMOST_TOKEN)');
   }
   if (!config.teamId) {
     missing.push('teamId (--team-id or MATTERMOST_TEAM_ID)');
