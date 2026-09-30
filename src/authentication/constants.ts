@@ -134,6 +134,8 @@ export const HTTP_POST_METHOD = 'POST';
 export const HTTP_REDIRECT_MANUAL = 'manual';
 export const HTTP_STATUS_OK = 200;
 export const HTTP_STATUS_UNAUTHORIZED = 401;
+export const HTTP_STATUS_FORBIDDEN = 403;
+export const HTTP_STATUS_NOT_FOUND = 404;
 export const UNKNOWN_ERROR_NAME = 'UnknownError';
 export const VACANT_STEPS_BEFORE_LOGIN_NOT_COMPLETED = 2;
 

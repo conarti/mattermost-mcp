@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
+import fileSystem from 'node:fs/promises';
 import { mkdir, mkdtemp, readdir, readFile, writeFile } from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
-import { isAbsolute, join } from 'node:path';
+import { basename, dirname, isAbsolute, join } from 'node:path';
 import { Readable } from 'node:stream';
 import { after, test } from 'node:test';
 import { StaticTokenProvider } from '../../src/authentication/session.js';
@@ -10,6 +12,7 @@ import type { Config } from '../../src/config.js';
 import {
   DOWNLOAD_DIRECTORY_NAME,
   INLINE_IMAGE_MAX_BYTES,
+  INLINE_SKIPPED_READ_FAILED_REASON,
   INLINE_SKIPPED_SIZE_REASON,
   INVALID_FILE_ID_MESSAGE,
   PARTIAL_FILE_SUFFIX,
@@ -318,7 +321,6 @@ test('D10: inline returns the text block first and an image block only for small
     assert.equal(output.inline_skipped_reason, expectedReason, description);
     assert.deepEqual(await readFile(output.path), bytes, description);
   }
-  assert.match(createInlineSkippedTypeReason('image/svg+xml'), /image\/svg\+xml/);
 });
 
 test('D11: 404 and 403 responses return isError with a clear text', async (t) => {
@@ -341,6 +343,70 @@ test('D11: 404 and 403 responses return isError with a clear text', async (t) =>
   const infoResult: ToolResult = await handleGetFileInfo(createClient(new FakeHttp(() => ({ status: 404 }))), { file_id: FILE_ID });
   assert.equal(infoResult.isError, true);
   assert.equal(parseTextContent(infoResult).error, `File ${FILE_ID} not found or not accessible`);
-  assert.equal(createFileForbiddenMessage(FILE_ID), `No permission to access file ${FILE_ID}`);
   assert.deepEqual(await listPartialFiles(join(environment.temporaryDirectory, DOWNLOAD_DIRECTORY_NAME)), []);
+});
+
+test('D12: a failing cleanup of the partial file does not replace the original error', async (t) => {
+  t.mock.method(console, 'error', () => undefined);
+  t.mock.method(fileSystem, 'rm', async () => {
+    throw new Error('cleanup failed');
+  });
+  syncBuiltinESMExports();
+  t.after(() => syncBuiltinESMExports());
+  const environment = await createDownloadEnvironment();
+  const failingHttp = createFileHttp(PDF_FILE_INFO, () => ({ status: 500 }));
+
+  const result: ToolResult = await handleDownloadFile(createClient(failingHttp), { file_id: FILE_ID }, environment);
+  assert.equal(result.isError, true);
+  assert.equal(parseTextContent(result).error, 'Failed to download file: 500 Internal Server Error');
+});
+
+test('D13: the actual size is checked before reading, an oversized file is never read', async (t) => {
+  t.mock.method(console, 'error', () => undefined);
+  const readFileMock = t.mock.method(fileSystem, 'readFile');
+  syncBuiltinESMExports();
+  t.after(() => syncBuiltinESMExports());
+  const environment = await createDownloadEnvironment();
+  const http = createFileHttp(PNG_FILE_INFO, () => ({ status: 200, body: Buffer.alloc(INLINE_IMAGE_MAX_BYTES + 1) }));
+
+  const result: ToolResult = await handleDownloadFile(createClient(http), { file_id: FILE_ID, inline: true }, environment);
+  assert.equal(result.isError, undefined);
+  assert.equal(result.content.length, 1);
+  assert.equal(parseTextContent(result).inline_skipped_reason, INLINE_SKIPPED_SIZE_REASON);
+  assert.equal(readFileMock.mock.callCount(), 0);
+});
+
+test('D14: the default file name is built from the requested file_id, not from the server id', async (t) => {
+  t.mock.method(console, 'error', () => undefined);
+  const environment = await createDownloadEnvironment();
+  const http = createFileHttp({ ...PDF_FILE_INFO, id: SERVER_FILE_ID });
+
+  const result: ToolResult = await handleDownloadFile(createClient(http), { file_id: FILE_ID }, environment);
+  assert.equal(result.isError, undefined);
+  assert.equal(parseTextContent(result).path, join(environment.temporaryDirectory, DOWNLOAD_DIRECTORY_NAME, `${FILE_ID}_report.pdf`));
+
+  const unsafeNameHttp = createFileHttp({ ...PDF_FILE_INFO, id: SERVER_FILE_ID, name: '..' });
+  const unsafeNameResult: ToolResult = await handleDownloadFile(
+    createClient(unsafeNameHttp),
+    { file_id: FILE_ID, output_path: `${environment.cwd}/` },
+    environment,
+  );
+  assert.equal(parseTextContent(unsafeNameResult).path, join(environment.cwd, FILE_ID));
+});
+
+test('D15: a failure to read the saved file for inline returns success with inline_skipped_reason', async (t) => {
+  t.mock.method(console, 'error', () => undefined);
+  t.mock.method(fileSystem, 'readFile', async () => {
+    throw new Error('read failed');
+  });
+  syncBuiltinESMExports();
+  t.after(() => syncBuiltinESMExports());
+  const environment = await createDownloadEnvironment();
+
+  const result: ToolResult = await handleDownloadFile(createClient(createFileHttp(PNG_FILE_INFO)), { file_id: FILE_ID, inline: true }, environment);
+  assert.equal(result.isError, undefined);
+  assert.equal(result.content.length, 1);
+  const output = parseTextContent(result);
+  assert.equal(output.inline_skipped_reason, INLINE_SKIPPED_READ_FAILED_REASON);
+  assert.deepEqual(await readdir(dirname(output.path)), [basename(output.path)]);
 });

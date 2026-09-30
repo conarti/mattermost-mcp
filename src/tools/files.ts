@@ -5,8 +5,10 @@ import { mkdir, readFile, rename, rm, stat } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { pipeline } from "node:stream/promises";
+import { HTTP_STATUS_FORBIDDEN, HTTP_STATUS_NOT_FOUND } from "../authentication/constants.js";
 import { MattermostClient, MattermostRequestError } from "../client.js";
 import { DownloadFileArgs, FileInfo, GetFileInfoArgs } from "../types.js";
+import { createErrorResult } from "./errorResult.js";
 import { isValidMattermostId } from "./mattermostId.js";
 import { formatFile } from "./postFormatting.js";
 
@@ -17,9 +19,8 @@ export const INLINE_IMAGE_MAX_BYTES = 1024 * 1024;
 export const INLINE_IMAGE_MIME_TYPES: readonly string[] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
 export const INVALID_FILE_ID_MESSAGE = "Invalid file_id: expected a 26-character Mattermost id";
 export const INLINE_SKIPPED_SIZE_REASON = "Inline skipped: file is larger than 1 MB";
+export const INLINE_SKIPPED_READ_FAILED_REASON = "Inline skipped: the saved file could not be read";
 
-const HTTP_STATUS_FORBIDDEN = 403;
-const HTTP_STATUS_NOT_FOUND = 404;
 const FILE_NOT_FOUND_ERROR_CODE = "ENOENT";
 const HOME_DIRECTORY_SHORTCUT = "~";
 const HOME_DIRECTORY_PREFIXES = ["~/", "~\\"];
@@ -165,20 +166,6 @@ function describeFileError(error: unknown, fileId: string): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function createErrorResult(message: string) {
-  return {
-    content: [
-      {
-        type: "text",
-        text: JSON.stringify({
-          error: message,
-        }),
-      },
-    ],
-    isError: true,
-  };
-}
-
 export async function handleGetFileInfo(
   client: MattermostClient,
   args: GetFileInfoArgs
@@ -226,7 +213,11 @@ export async function handleDownloadFile(
   try {
     const fileInfo = await client.getFileInfo(file_id);
     let inlineDecision = inline ? decideInlineImage(fileInfo.mime_type, fileInfo.size) : undefined;
-    const targetPath = await resolveDownloadTarget({ outputPath: output_path, fileInfo, ...dependencies });
+    const targetPath = await resolveDownloadTarget({
+      outputPath: output_path,
+      fileInfo: { id: file_id, name: fileInfo.name },
+      ...dependencies,
+    });
     await mkdir(dirname(targetPath), { recursive: true });
 
     /* Запись во временный файл и rename: при сбое старый файл по тому же пути не тронут, параллельные загрузки не пересекаются */
@@ -238,11 +229,17 @@ export async function handleDownloadFile(
 
     let imageData: string | undefined;
     if (inlineDecision?.inline) {
-      const fileContent = await readFile(targetPath);
-      if (fileContent.byteLength > INLINE_IMAGE_MAX_BYTES) {
-        inlineDecision = { inline: false, reason: INLINE_SKIPPED_SIZE_REASON };
-      } else {
-        imageData = fileContent.toString("base64");
+      try {
+        const actualSize = (await stat(targetPath)).size;
+        if (actualSize > INLINE_IMAGE_MAX_BYTES) {
+          inlineDecision = { inline: false, reason: INLINE_SKIPPED_SIZE_REASON };
+        } else {
+          imageData = (await readFile(targetPath)).toString("base64");
+        }
+      } catch (error) {
+        /* Файл уже сохранён, поэтому сбой чтения для inline не должен превращать успех в ошибку */
+        console.error("Error reading file for inline:", error);
+        inlineDecision = { inline: false, reason: INLINE_SKIPPED_READ_FAILED_REASON };
       }
     }
 
@@ -266,7 +263,7 @@ export async function handleDownloadFile(
     return { content };
   } catch (error) {
     if (partialPath !== undefined) {
-      await rm(partialPath, { force: true });
+      await rm(partialPath, { force: true }).catch(() => undefined);
     }
     console.error("Error downloading file:", error);
     return createErrorResult(describeFileError(error, file_id));

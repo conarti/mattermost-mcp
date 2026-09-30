@@ -333,8 +333,8 @@ Posts with attachments in `mattermost_get_channel_history` and `mattermost_get_t
 
 **Examples:**
 
-- Save to the temporary directory: `{ "file_id": "abc123" }`
-- Save into `~/Downloads` and show a small image inline: `{ "file_id": "abc123", "output_path": "~/Downloads/", "inline": true }`
+- Save to the temporary directory: `{ "file_id": "abcdefghijklmnopqrstuvwxyz" }`
+- Save into `~/Downloads` and show a small image inline: `{ "file_id": "abcdefghijklmnopqrstuvwxyz", "output_path": "~/Downloads/", "inline": true }`
 
 ### User Tools
 
