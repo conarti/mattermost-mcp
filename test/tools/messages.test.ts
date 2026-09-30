@@ -5,6 +5,7 @@ import { MattermostClient } from '../../src/client.js';
 import type { Config } from '../../src/config.js';
 import {
   EDIT_POST_FORBIDDEN_HINT,
+  INVALID_MESSAGE_MESSAGE,
   INVALID_POST_ID_MESSAGE,
   createPostNotFoundMessage,
   editPostTool,
@@ -77,6 +78,12 @@ test('E1: an invalid post_id returns isError without any HTTP request', async (t
       assert.equal(result.isError, true, invalidId);
       assert.equal(parseTextContent(result).error, INVALID_POST_ID_MESSAGE);
     }
+  }
+
+  for (const invalidMessage of [undefined, null, 42, { text: 'x' }]) {
+    const result: ToolResult = await handleEditPost(client, { post_id: POST_ID, message: invalidMessage as unknown as string });
+    assert.equal(result.isError, true, String(invalidMessage));
+    assert.equal(parseTextContent(result).error, INVALID_MESSAGE_MESSAGE);
   }
   assert.equal(http.records.length, 0);
 });

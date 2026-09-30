@@ -1,4 +1,5 @@
 import { Tool } from "@modelcontextprotocol/sdk/types.js";
+import { HTTP_STATUS_FORBIDDEN, HTTP_STATUS_NOT_FOUND } from "../authentication/constants.js";
 import { MattermostClient, MattermostRequestError } from "../client.js";
 import { 
   PostMessageArgs, 
@@ -8,15 +9,14 @@ import {
   GetPostArgs,
   EditPostArgs
 } from "../types.js";
+import { createErrorResult } from "./errorResult.js";
 import { isValidMattermostId } from "./mattermostId.js";
 import { formatPostAttachments } from "./postFormatting.js";
 
 export const INVALID_POST_ID_MESSAGE = "Invalid post_id: expected a 26-character Mattermost id";
+export const INVALID_MESSAGE_MESSAGE = "Invalid message: expected a string";
 export const EDIT_POST_FORBIDDEN_HINT =
   "Only the post author or a user with permission to edit others' posts can edit this post.";
-
-const HTTP_STATUS_FORBIDDEN = 403;
-const HTTP_STATUS_NOT_FOUND = 404;
 
 export function createPostNotFoundMessage(postId: string): string {
   return `Post ${postId} not found or not accessible`;
@@ -321,20 +321,6 @@ export const editPostTool: Tool = {
   },
 };
 
-function createErrorResult(message: string) {
-  return {
-    content: [
-      {
-        type: "text",
-        text: JSON.stringify({
-          error: message,
-        }),
-      },
-    ],
-    isError: true,
-  };
-}
-
 function formatOptionalTimestamp(timestamp: number): string | null {
   return timestamp ? new Date(timestamp).toISOString() : null;
 }
@@ -395,6 +381,9 @@ export async function handleEditPost(
   const { post_id, message } = args;
   if (!isValidMattermostId(post_id)) {
     return createErrorResult(INVALID_POST_ID_MESSAGE);
+  }
+  if (typeof message !== "string") {
+    return createErrorResult(INVALID_MESSAGE_MESSAGE);
   }
 
   try {
