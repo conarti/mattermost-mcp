@@ -1,3 +1,10 @@
+# [1.4.0](https://github.com/conarti/mattermost-mcp/compare/v1.3.0...v1.4.0) (2026-09-30)
+
+
+### Features
+
+* add get and edit post tools ([#7](https://github.com/conarti/mattermost-mcp/issues/7)) ([f2fc671](https://github.com/conarti/mattermost-mcp/commit/f2fc6716b6140538ace523cbb1d81e0618e23012))
+
 # [1.3.0](https://github.com/conarti/mattermost-mcp/compare/v1.2.0...v1.3.0) (2026-09-30)
 
 
