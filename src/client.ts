@@ -102,8 +102,13 @@ export class MattermostClient {
     return this.tokenProvider.mode === AUTHENTICATION_MODES.BROWSER ? this.callContext.cancellationSignal : undefined;
   }
 
-  /** Ровно один повтор после 401: провайдер получает отвергнутый токен, в статическом режиме повтора нет */
   private async request<ResponseBody>(options: MattermostRequestOptions): Promise<ResponseBody> {
+    const response = await this.authorizedSend(options);
+    return (await response.json()) as ResponseBody;
+  }
+
+  /** Ровно один повтор после 401: провайдер получает отвергнутый токен, в статическом режиме повтора нет */
+  private async authorizedSend(options: MattermostRequestOptions): Promise<HttpResponse> {
     const token = await this.tokenProvider.getToken(this.callContext);
     this.throwIfCallCancelled(options);
     let response = await this.send(options, token);
@@ -130,7 +135,7 @@ export class MattermostClient {
       throw await this.createFailureError(options, response);
     }
 
-    return (await response.json()) as ResponseBody;
+    return response;
   }
 
   /** Вход, дождавшийся отмены вызова, сохраняет токен в сессии, но действие вызова уже не отправляется */

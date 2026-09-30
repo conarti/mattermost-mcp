@@ -46,7 +46,7 @@ const STILL_UNAUTHORIZED_LOG_LINE = '[auth] request still unauthorized after sig
 const REQUEST_CANCELLED_LOG_LINE = '[auth] caller cancelled, request not sent';
 const SERVER_ERROR_BODY = '{"id":"app.internal_failure"}';
 const CHANNEL_ID = 'channel-1';
-const NON_API_MEMBER_NAMES = ['constructor', 'withCallContext', 'request', 'throwIfCallCancelled', 'send', 'createFailureError'];
+const NON_API_MEMBER_NAMES = ['constructor', 'withCallContext', 'request', 'authorizedSend', 'throwIfCallCancelled', 'send', 'createFailureError'];
 
 const CONFIG: Config = { mattermostUrl: MATTERMOST_URL, token: '', teamId: TEAM_ID };
 const SUCCESS_REPLY: FakeHttpReply = { status: 200, body: { id: USER_ID, order: [], posts: {} } };
