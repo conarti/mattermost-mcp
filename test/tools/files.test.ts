@@ -1,7 +1,5 @@
 import assert from 'node:assert/strict';
-import fileSystem from 'node:fs/promises';
-import { mkdir, mkdtemp, readdir, readFile, writeFile } from 'node:fs/promises';
-import { syncBuiltinESMExports } from 'node:module';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import { Readable } from 'node:stream';
@@ -348,28 +346,33 @@ test('D11: 404 and 403 responses return isError with a clear text', async (t) =>
 
 test('D12: a failing cleanup of the partial file does not replace the original error', async (t) => {
   t.mock.method(console, 'error', () => undefined);
-  t.mock.method(fileSystem, 'rm', async () => {
+  const failingRm = t.mock.fn(async () => {
     throw new Error('cleanup failed');
   });
-  syncBuiltinESMExports();
-  t.after(() => syncBuiltinESMExports());
   const environment = await createDownloadEnvironment();
   const failingHttp = createFileHttp(PDF_FILE_INFO, () => ({ status: 500 }));
 
-  const result: ToolResult = await handleDownloadFile(createClient(failingHttp), { file_id: FILE_ID }, environment);
+  const result: ToolResult = await handleDownloadFile(
+    createClient(failingHttp),
+    { file_id: FILE_ID },
+    { ...environment, fileSystem: { rm: failingRm, stat, readFile } },
+  );
+  assert.equal(failingRm.mock.callCount(), 1);
   assert.equal(result.isError, true);
   assert.equal(parseTextContent(result).error, 'Failed to download file: 500 Internal Server Error');
 });
 
 test('D13: the actual size is checked before reading, an oversized file is never read', async (t) => {
   t.mock.method(console, 'error', () => undefined);
-  const readFileMock = t.mock.method(fileSystem, 'readFile');
-  syncBuiltinESMExports();
-  t.after(() => syncBuiltinESMExports());
+  const readFileMock = t.mock.fn(readFile);
   const environment = await createDownloadEnvironment();
   const http = createFileHttp(PNG_FILE_INFO, () => ({ status: 200, body: Buffer.alloc(INLINE_IMAGE_MAX_BYTES + 1) }));
 
-  const result: ToolResult = await handleDownloadFile(createClient(http), { file_id: FILE_ID, inline: true }, environment);
+  const result: ToolResult = await handleDownloadFile(
+    createClient(http),
+    { file_id: FILE_ID, inline: true },
+    { ...environment, fileSystem: { rm, stat, readFile: readFileMock } },
+  );
   assert.equal(result.isError, undefined);
   assert.equal(result.content.length, 1);
   assert.equal(parseTextContent(result).inline_skipped_reason, INLINE_SKIPPED_SIZE_REASON);
@@ -396,14 +399,16 @@ test('D14: the default file name is built from the requested file_id, not from t
 
 test('D15: a failure to read the saved file for inline returns success with inline_skipped_reason', async (t) => {
   t.mock.method(console, 'error', () => undefined);
-  t.mock.method(fileSystem, 'readFile', async () => {
+  const failingReadFile = async (): Promise<Buffer> => {
     throw new Error('read failed');
-  });
-  syncBuiltinESMExports();
-  t.after(() => syncBuiltinESMExports());
+  };
   const environment = await createDownloadEnvironment();
 
-  const result: ToolResult = await handleDownloadFile(createClient(createFileHttp(PNG_FILE_INFO)), { file_id: FILE_ID, inline: true }, environment);
+  const result: ToolResult = await handleDownloadFile(
+    createClient(createFileHttp(PNG_FILE_INFO)),
+    { file_id: FILE_ID, inline: true },
+    { ...environment, fileSystem: { rm, stat, readFile: failingReadFile } },
+  );
   assert.equal(result.isError, undefined);
   assert.equal(result.content.length, 1);
   const output = parseTextContent(result);

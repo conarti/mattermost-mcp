@@ -40,11 +40,21 @@ export function createFileForbiddenMessage(fileId: string): string {
   return `No permission to access file ${fileId}`;
 }
 
+/** Операции с диском после скачивания, подменяются в тестах без глобальных моков */
+export interface DownloadFileSystem {
+  rm(path: string, options: { force: boolean }): Promise<void>;
+  stat(path: string): Promise<{ size: number; isDirectory(): boolean }>;
+  readFile(path: string): Promise<Buffer>;
+}
+
 export interface DownloadFileDependencies {
   temporaryDirectory: string;
   homeDirectory: string;
   cwd: string;
+  fileSystem?: DownloadFileSystem;
 }
+
+const NODE_FILE_SYSTEM: DownloadFileSystem = { rm, stat, readFile };
 
 export type InlineImageDecision = { inline: true } | { inline: false; reason: string };
 
@@ -208,6 +218,7 @@ export async function handleDownloadFile(
   if (!isValidMattermostId(file_id)) {
     return createErrorResult(INVALID_FILE_ID_MESSAGE);
   }
+  const { fileSystem = NODE_FILE_SYSTEM, ...directories } = dependencies;
 
   let partialPath: string | undefined;
   try {
@@ -216,12 +227,13 @@ export async function handleDownloadFile(
     const targetPath = await resolveDownloadTarget({
       outputPath: output_path,
       fileInfo: { id: file_id, name: fileInfo.name },
-      ...dependencies,
+      ...directories,
+      stat: fileSystem.stat,
     });
     await mkdir(dirname(targetPath), { recursive: true });
 
     /* Запись во временный файл и rename: при сбое старый файл по тому же пути не тронут, параллельные загрузки не пересекаются */
-    partialPath = `${targetPath}.${process.pid}.${randomUUID()}${PARTIAL_FILE_SUFFIX}`;
+    partialPath = `${targetPath}.${randomUUID()}${PARTIAL_FILE_SUFFIX}`;
     const body = await client.downloadFile(file_id);
     await pipeline(body, createWriteStream(partialPath));
     await rename(partialPath, targetPath);
@@ -230,11 +242,11 @@ export async function handleDownloadFile(
     let imageData: string | undefined;
     if (inlineDecision?.inline) {
       try {
-        const actualSize = (await stat(targetPath)).size;
+        const actualSize = (await fileSystem.stat(targetPath)).size;
         if (actualSize > INLINE_IMAGE_MAX_BYTES) {
           inlineDecision = { inline: false, reason: INLINE_SKIPPED_SIZE_REASON };
         } else {
-          imageData = (await readFile(targetPath)).toString("base64");
+          imageData = (await fileSystem.readFile(targetPath)).toString("base64");
         }
       } catch (error) {
         /* Файл уже сохранён, поэтому сбой чтения для inline не должен превращать успех в ошибку */
@@ -263,7 +275,7 @@ export async function handleDownloadFile(
     return { content };
   } catch (error) {
     if (partialPath !== undefined) {
-      await rm(partialPath, { force: true }).catch(() => undefined);
+      await fileSystem.rm(partialPath, { force: true }).catch(() => undefined);
     }
     console.error("Error downloading file:", error);
     return createErrorResult(describeFileError(error, file_id));
