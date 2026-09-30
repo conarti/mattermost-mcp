@@ -9,6 +9,7 @@ import {
   CURRENT_USER_API_PATH,
   HTTP_GET_METHOD,
   HTTP_POST_METHOD,
+  HTTP_PUT_METHOD,
   HTTP_STATUS_UNAUTHORIZED,
   JSON_CONTENT_TYPE,
 } from './authentication/constants.js';
@@ -346,6 +347,17 @@ export class MattermostClient {
       url: `${this.baseUrl}/posts/${postId}`,
       failureMessage: 'Failed to get post',
       includeResponseBodyInError: false,
+    });
+  }
+
+  async patchPost(postId: string, message: string): Promise<Post> {
+    return this.request<Post>({
+      method: HTTP_PUT_METHOD,
+      url: `${this.baseUrl}/posts/${postId}/patch`,
+      body: { message },
+      failureMessage: 'Failed to edit post',
+      /* Текст сервера объясняет отказ при 400 и 403 */
+      includeResponseBodyInError: true,
     });
   }
 

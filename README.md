@@ -310,8 +310,12 @@ The first tool call opens the sign-in window and, on the first sign-in, download
 | `mattermost_reply_to_thread` | Reply to a specific message thread |
 | `mattermost_add_reaction` | Add an emoji reaction to a message |
 | `mattermost_get_thread_replies` | Get all replies in a thread |
+| `mattermost_get_post` | Get a single message by ID (text, author, channel, creation and edit time, thread root, attachments) |
+| `mattermost_edit_post` | Replace the text of an existing message and return `id`, `message` and `edit_at` |
 
 Posts with attachments in `mattermost_get_channel_history` and `mattermost_get_thread_replies` (including `root_post`) include `file_ids` and `files` (`id`, `name`, `extension`, `size`, `mime_type`, and `width`/`height` for images). Posts without attachments have neither field.
+
+`mattermost_edit_post` takes `post_id` and `message`. Mattermost marks an edited post as "Edited" for everyone in the channel. Only the post author or a user with permission to edit others' posts can edit it: a 403 returns the server text with that hint, and other errors (for example 400 when the edit time limit has passed) return the server text as is. Both tools reject a `post_id` that is not a 26-character Mattermost id before sending any request.
 
 ### File Tools
 

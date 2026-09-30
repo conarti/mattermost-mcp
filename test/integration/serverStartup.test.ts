@@ -33,7 +33,7 @@ import { environmentWithout, removeDirectories } from '../fixtures/runProcess.js
 const CHILD_PROCESS_TEST_TIMEOUT_MILLISECONDS = 30_000;
 const STATIC_TOKEN = 'static-secret-token-0001';
 const TOOLS_LIST_REQUEST_ID = 2;
-const EXPECTED_TOOL_COUNT = 11;
+const EXPECTED_TOOL_COUNT = 13;
 const UNENCRYPTED_URL_WARNING_FRAGMENT = 'sent without encryption';
 /* Сервер не обращается к адресу до вызова инструмента, поэтому несуществующий хост не даёт сетевых запросов */
 const UNENCRYPTED_REMOTE_MATTERMOST_URL = 'http://chat.example.test/api/v4';

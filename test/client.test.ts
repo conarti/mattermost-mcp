@@ -182,6 +182,12 @@ const PUBLIC_METHOD_CALLS: readonly PublicMethodCall[] = [
     serverErrorMessage: `Failed to get post: ${SERVER_ERROR_STATUS_DESCRIPTION}`,
   },
   {
+    name: 'patchPost',
+    call: (client) => client.patchPost('post-1', 'edited'),
+    expectedRequests: [{ method: 'PUT', url: `${MATTERMOST_URL}/posts/post-1/patch`, body: '{"message":"edited"}' }],
+    serverErrorMessage: `Failed to edit post: ${SERVER_ERROR_STATUS_DESCRIPTION} - ${SERVER_ERROR_BODY}`,
+  },
+  {
     name: 'getPostThread',
     call: (client) => client.getPostThread('post-1'),
     expectedRequests: [{ method: 'GET', url: `${MATTERMOST_URL}/posts/post-1/thread`, body: undefined }],
@@ -247,7 +253,7 @@ test('C1: every public method sends the current provider token and keeps its req
       typeof Object.getOwnPropertyDescriptor(MattermostClient.prototype, name)?.value === 'function' &&
       !NON_API_MEMBER_NAMES.includes(name),
   );
-  assert.equal(PUBLIC_METHOD_CALLS.length, 15);
+  assert.equal(PUBLIC_METHOD_CALLS.length, 16);
   assert.deepEqual([...prototypeMethodNames].sort(), PUBLIC_METHOD_CALLS.map(({ name }) => name).sort());
 
   const provider = new ScriptedTokenProvider(AUTHENTICATION_MODES.BROWSER, FIRST_PROVIDER_TOKEN, undefined);
