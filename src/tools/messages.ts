@@ -1,12 +1,26 @@
 import { Tool } from "@modelcontextprotocol/sdk/types.js";
-import { MattermostClient } from "../client.js";
+import { HTTP_STATUS_FORBIDDEN, HTTP_STATUS_NOT_FOUND } from "../authentication/constants.js";
+import { MattermostClient, MattermostRequestError } from "../client.js";
 import { 
   PostMessageArgs, 
   ReplyToThreadArgs, 
   AddReactionArgs, 
-  GetThreadRepliesArgs 
+  GetThreadRepliesArgs,
+  GetPostArgs,
+  EditPostArgs
 } from "../types.js";
+import { createErrorResult } from "./errorResult.js";
+import { isValidMattermostId } from "./mattermostId.js";
 import { formatPostAttachments } from "./postFormatting.js";
+
+export const INVALID_POST_ID_MESSAGE = "Invalid post_id: expected a 26-character Mattermost id";
+export const INVALID_MESSAGE_MESSAGE = "Invalid message: expected a string";
+export const EDIT_POST_FORBIDDEN_HINT =
+  "Only the post author or a user with permission to edit others' posts can edit this post.";
+
+export function createPostNotFoundMessage(postId: string): string {
+  return `Post ${postId} not found or not accessible`;
+}
 
 // Tool definition for posting a message
 export const postMessageTool: Tool = {
@@ -267,5 +281,128 @@ export async function handleGetThreadReplies(
       ],
       isError: true,
     };
+  }
+}
+
+export const getPostTool: Tool = {
+  name: "mattermost_get_post",
+  description: "Get a single message by its ID, including edit time and attachments",
+  inputSchema: {
+    type: "object",
+    properties: {
+      post_id: {
+        type: "string",
+        description: "The ID of the message",
+      },
+    },
+    required: ["post_id"],
+  },
+};
+
+export const editPostTool: Tool = {
+  name: "mattermost_edit_post",
+  description:
+    "Edit the text of an existing message. " +
+    'Mattermost marks an edited post as "Edited" for everyone in the channel. ' +
+    "Only the post author or a user with permission to edit others' posts can edit it.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      post_id: {
+        type: "string",
+        description: "The ID of the message to edit",
+      },
+      message: {
+        type: "string",
+        description: "The new message text that replaces the current one",
+      },
+    },
+    required: ["post_id", "message"],
+  },
+};
+
+function formatOptionalTimestamp(timestamp: number): string | null {
+  return timestamp ? new Date(timestamp).toISOString() : null;
+}
+
+function describeGetPostError(error: unknown, postId: string): string {
+  if (error instanceof MattermostRequestError && error.status === HTTP_STATUS_NOT_FOUND) {
+    return createPostNotFoundMessage(postId);
+  }
+  return error instanceof Error ? error.message : String(error);
+}
+
+function describeEditPostError(error: unknown): string {
+  if (error instanceof MattermostRequestError && error.status === HTTP_STATUS_FORBIDDEN) {
+    return `${error.message} ${EDIT_POST_FORBIDDEN_HINT}`;
+  }
+  return error instanceof Error ? error.message : String(error);
+}
+
+export async function handleGetPost(
+  client: MattermostClient,
+  args: GetPostArgs
+) {
+  const { post_id } = args;
+  if (!isValidMattermostId(post_id)) {
+    return createErrorResult(INVALID_POST_ID_MESSAGE);
+  }
+
+  try {
+    const post = await client.getPost(post_id);
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            id: post.id,
+            channel_id: post.channel_id,
+            user_id: post.user_id,
+            message: post.message,
+            create_at: new Date(post.create_at).toISOString(),
+            edit_at: formatOptionalTimestamp(post.edit_at),
+            root_id: post.root_id || null,
+            ...formatPostAttachments(post),
+          }, null, 2),
+        },
+      ],
+    };
+  } catch (error) {
+    console.error("Error getting post:", error);
+    return createErrorResult(describeGetPostError(error, post_id));
+  }
+}
+
+export async function handleEditPost(
+  client: MattermostClient,
+  args: EditPostArgs
+) {
+  const { post_id, message } = args;
+  if (!isValidMattermostId(post_id)) {
+    return createErrorResult(INVALID_POST_ID_MESSAGE);
+  }
+  if (typeof message !== "string") {
+    return createErrorResult(INVALID_MESSAGE_MESSAGE);
+  }
+
+  try {
+    const post = await client.patchPost(post_id, message);
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            id: post.id,
+            message: post.message,
+            edit_at: formatOptionalTimestamp(post.edit_at),
+          }, null, 2),
+        },
+      ],
+    };
+  } catch (error) {
+    console.error("Error editing post:", error);
+    return createErrorResult(describeEditPostError(error));
   }
 }

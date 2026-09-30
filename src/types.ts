@@ -58,6 +58,15 @@ export interface DownloadFileArgs {
   inline?: boolean;
 }
 
+export interface GetPostArgs {
+  post_id: string;
+}
+
+export interface EditPostArgs {
+  post_id: string;
+  message: string;
+}
+
 // Mattermost API response types
 export interface Channel {
   id: string;
@@ -164,7 +173,7 @@ export interface UsersResponse {
 }
 
 export interface HttpRequest {
-  method: 'GET' | 'POST';
+  method: 'GET' | 'POST' | 'PUT';
   headers: Record<string, string>;
   body?: string;
   signal?: AbortSignal;
