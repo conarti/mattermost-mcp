@@ -15,6 +15,12 @@ import {
   handleAddReaction,
   handleGetThreadReplies
 } from "./messages.js";
+import {
+  getFileInfoTool,
+  downloadFileTool,
+  handleGetFileInfo,
+  handleDownloadFile
+} from "./files.js";
 import { 
   getUsersTool, 
   getUserProfileTool,
@@ -37,6 +43,8 @@ export const tools: Tool[] = [
   replyToThreadTool,
   addReactionTool,
   getThreadRepliesTool,
+  getFileInfoTool,
+  downloadFileTool,
   getUsersTool,
   getUserProfileTool,
   runMonitoringTool
@@ -53,6 +61,8 @@ export const toolHandlers: Record<string, Function> = {
   mattermost_reply_to_thread: handleReplyToThread,
   mattermost_add_reaction: handleAddReaction,
   mattermost_get_thread_replies: handleGetThreadReplies,
+  mattermost_get_file_info: handleGetFileInfo,
+  mattermost_download_file: handleDownloadFile,
   mattermost_get_users: handleGetUsers,
   mattermost_get_user_profile: handleGetUserProfile,
   mattermost_run_monitoring: handleRunMonitoring

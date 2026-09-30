@@ -21,6 +21,7 @@ import {
 } from './authentication/session.js';
 import {
   Channel,
+  FileInfo,
   Post,
   User,
   UserProfile,
@@ -64,6 +65,18 @@ interface MattermostRequestOptions {
   includeResponseBodyInError: boolean;
   /** Статус ответа и тело ошибки в stderr, как делал getChannels в 1.1.2 */
   logResponseDiagnostics?: boolean;
+  /** Без значения запрос объявляет JSON тело, как все запросы 1.1.2 */
+  sendJsonContentType?: boolean;
+}
+
+/** Ошибка ответа Mattermost со статусом, текст сообщения прежний */
+export class MattermostRequestError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+  }
 }
 
 export class MattermostClient {
@@ -102,8 +115,22 @@ export class MattermostClient {
     return this.tokenProvider.mode === AUTHENTICATION_MODES.BROWSER ? this.callContext.cancellationSignal : undefined;
   }
 
-  /** Ровно один повтор после 401: провайдер получает отвергнутый токен, в статическом режиме повтора нет */
   private async request<ResponseBody>(options: MattermostRequestOptions): Promise<ResponseBody> {
+    const response = await this.authorizedSend(options);
+    return (await response.json()) as ResponseBody;
+  }
+
+  /** Тело отдаётся потоком без чтения в память, читает его вызывающий */
+  private async requestBinary(options: MattermostRequestOptions): Promise<NodeJS.ReadableStream> {
+    const response = await this.authorizedSend({ ...options, sendJsonContentType: false });
+    if (response.body === null) {
+      throw new Error(`${options.failureMessage}: empty response body`);
+    }
+    return response.body;
+  }
+
+  /** Ровно один повтор после 401: провайдер получает отвергнутый токен, в статическом режиме повтора нет */
+  private async authorizedSend(options: MattermostRequestOptions): Promise<HttpResponse> {
     const token = await this.tokenProvider.getToken(this.callContext);
     this.throwIfCallCancelled(options);
     let response = await this.send(options, token);
@@ -130,7 +157,7 @@ export class MattermostClient {
       throw await this.createFailureError(options, response);
     }
 
-    return (await response.json()) as ResponseBody;
+    return response;
   }
 
   /** Вход, дождавшийся отмены вызова, сохраняет токен в сессии, но действие вызова уже не отправляется */
@@ -149,7 +176,7 @@ export class MattermostClient {
       method: options.method,
       headers: {
         [AUTHORIZATION_HEADER_NAME]: `${BEARER_TOKEN_PREFIX}${token}`,
-        [CONTENT_TYPE_HEADER_NAME]: JSON_CONTENT_TYPE,
+        ...(options.sendJsonContentType === false ? {} : { [CONTENT_TYPE_HEADER_NAME]: JSON_CONTENT_TYPE }),
       },
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
       signal: this.cancellationSignal,
@@ -162,17 +189,17 @@ export class MattermostClient {
     return response;
   }
 
-  private async createFailureError(options: MattermostRequestOptions, response: HttpResponse): Promise<Error> {
+  private async createFailureError(options: MattermostRequestOptions, response: HttpResponse): Promise<MattermostRequestError> {
     const failureDescription = `${options.failureMessage}: ${response.status} ${response.statusText}`;
     if (!options.includeResponseBodyInError) {
-      return new Error(failureDescription);
+      return new MattermostRequestError(failureDescription, response.status);
     }
 
     const errorText = await response.text();
     if (options.logResponseDiagnostics) {
       console.error(`Error response body: ${errorText}`);
     }
-    return new Error(`${failureDescription} - ${errorText}`);
+    return new MattermostRequestError(`${failureDescription} - ${errorText}`, response.status);
   }
 
   async getChannels(limit: number = 100, page: number = 0): Promise<ChannelsResponse> {
@@ -327,6 +354,24 @@ export class MattermostClient {
       method: HTTP_GET_METHOD,
       url: `${this.baseUrl}/posts/${postId}/thread`,
       failureMessage: 'Failed to get post thread',
+      includeResponseBodyInError: false,
+    });
+  }
+
+  async getFileInfo(fileId: string): Promise<FileInfo> {
+    return this.request<FileInfo>({
+      method: HTTP_GET_METHOD,
+      url: `${this.baseUrl}/files/${fileId}/info`,
+      failureMessage: 'Failed to get file info',
+      includeResponseBodyInError: false,
+    });
+  }
+
+  async downloadFile(fileId: string): Promise<NodeJS.ReadableStream> {
+    return this.requestBinary({
+      method: HTTP_GET_METHOD,
+      url: `${this.baseUrl}/files/${fileId}`,
+      failureMessage: 'Failed to download file',
       includeResponseBodyInError: false,
     });
   }

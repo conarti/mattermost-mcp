@@ -6,6 +6,7 @@ import {
   AddReactionArgs, 
   GetThreadRepliesArgs 
 } from "../types.js";
+import { formatPostAttachments } from "./postFormatting.js";
 
 // Tool definition for posting a message
 export const postMessageTool: Tool = {
@@ -232,6 +233,7 @@ export async function handleGetThreadReplies(
         message: post.message,
         create_at: new Date(post.create_at).toISOString(),
         root_id: post.root_id || null,
+        ...formatPostAttachments(post),
       };
     });
     
@@ -246,6 +248,7 @@ export async function handleGetThreadReplies(
               user_id: response.posts[post_id].user_id,
               message: response.posts[post_id].message,
               create_at: new Date(response.posts[post_id].create_at).toISOString(),
+              ...formatPostAttachments(response.posts[post_id]),
             } : null,
           }, null, 2),
         },

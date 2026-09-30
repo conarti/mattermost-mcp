@@ -48,6 +48,16 @@ export interface GetUserProfileArgs {
   user_id: string;
 }
 
+export interface GetFileInfoArgs {
+  file_id: string;
+}
+
+export interface DownloadFileArgs {
+  file_id: string;
+  output_path?: string;
+  inline?: boolean;
+}
+
 // Mattermost API response types
 export interface Channel {
   id: string;
@@ -80,7 +90,25 @@ export interface Post {
   hashtags: string;
   pending_post_id: string;
   reply_count: number;
-  metadata: Record<string, any>;
+  file_ids?: string[];
+  metadata?: PostMetadata;
+}
+
+export interface FileInfo {
+  id: string;
+  name: string;
+  extension: string;
+  size: number;
+  mime_type: string;
+  width?: number;
+  height?: number;
+  post_id?: string;
+  create_at?: number;
+}
+
+export interface PostMetadata {
+  files?: FileInfo[];
+  [key: string]: unknown;
 }
 
 export interface User {
@@ -150,6 +178,8 @@ export interface HttpResponse {
   statusText: string;
   json(): Promise<unknown>;
   text(): Promise<string>;
+  /** Поток тела ответа, null только у ответов без тела */
+  body: NodeJS.ReadableStream | null;
 }
 
 export type HttpFetch = (url: string, request: HttpRequest) => Promise<HttpResponse>;
