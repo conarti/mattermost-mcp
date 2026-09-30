@@ -1,3 +1,10 @@
+# [1.3.0](https://github.com/conarti/mattermost-mcp/compare/v1.2.0...v1.3.0) (2026-09-30)
+
+
+### Features
+
+* show post attachments and add file download tools ([#6](https://github.com/conarti/mattermost-mcp/issues/6)) ([4d62dbd](https://github.com/conarti/mattermost-mcp/commit/4d62dbd6b6cedbf450fc1d0413f58811ba193962))
+
 # [1.2.0](https://github.com/conarti/mattermost-mcp/compare/v1.1.2...v1.2.0) (2026-09-14)
 
 
