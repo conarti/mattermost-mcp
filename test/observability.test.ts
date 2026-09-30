@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Readable } from 'node:stream';
 import { after, test } from 'node:test';
 import { AUTHENTICATION_LOG_PREFIX } from '../src/authentication/constants.js';
 import { createTokenProvider, createToolCallContext } from '../src/authentication/session.js';
@@ -27,6 +28,7 @@ function createResponse(status: number): HttpResponse {
     statusText: String(status),
     json: async () => ({ id: 'user-1' }),
     text: async () => '',
+    body: Readable.from([Buffer.from('')]),
   };
 }
 

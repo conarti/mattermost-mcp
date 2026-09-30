@@ -311,6 +311,31 @@ The first tool call opens the sign-in window and, on the first sign-in, download
 | `mattermost_add_reaction` | Add an emoji reaction to a message |
 | `mattermost_get_thread_replies` | Get all replies in a thread |
 
+Posts with attachments in `mattermost_get_channel_history` and `mattermost_get_thread_replies` (including `root_post`) include `file_ids` and `files` (`id`, `name`, `extension`, `size`, `mime_type`, and `width`/`height` for images). Posts without attachments have neither field.
+
+### File Tools
+
+| Tool | Description |
+|------|-------------|
+| `mattermost_get_file_info` | Get metadata of an attached file (name, extension, size, MIME type, image size, post ID) |
+| `mattermost_download_file` | Download an attached file to the local disk and return its absolute path and metadata |
+
+#### `mattermost_download_file` Options
+
+- `file_id` (required): The ID of the file, from `file_ids` or `files` of a post
+- `output_path`: Where to save the file
+  - Not set: the system temporary directory, as `mattermost-mcp/{file_id}_{name}`
+  - An existing directory, or a path ending with `/` or `\`: the file is saved inside it with its original name, missing directories are created
+  - Any other path: the file path, missing parent directories are created
+  - A leading `~` expands to your home directory (`~user` is not expanded), relative paths are resolved from the server working directory
+  - An existing file at the target path is overwritten
+- `inline` (default: false): Also return the image as MCP image content. Only `image/png`, `image/jpeg`, `image/gif` and `image/webp` up to 1 MB are returned inline; otherwise the response has `inline_skipped_reason`
+
+**Examples:**
+
+- Save to the temporary directory: `{ "file_id": "abc123" }`
+- Save into `~/Downloads` and show a small image inline: `{ "file_id": "abc123", "output_path": "~/Downloads/", "inline": true }`
+
 ### User Tools
 
 | Tool | Description |

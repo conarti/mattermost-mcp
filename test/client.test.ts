@@ -2,11 +2,13 @@ import assert from 'node:assert/strict';
 import { access, mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { buffer } from 'node:stream/consumers';
 import { after, test } from 'node:test';
 import { inspect } from 'node:util';
 import {
   AUTHENTICATION_ERROR_CODES,
   AUTHENTICATION_MODES,
+  JSON_CONTENT_TYPE,
   SESSION_COOKIE_NAME,
 } from '../src/authentication/constants.js';
 import { MattermostAuthenticationError } from '../src/authentication/runtime.js';
@@ -19,8 +21,9 @@ import {
   createToolCallContext,
 } from '../src/authentication/session.js';
 import { createFileTokenStore, resolveStatePaths } from '../src/authentication/stateFiles.js';
-import { MattermostClient } from '../src/client.js';
+import { MattermostClient, MattermostRequestError } from '../src/client.js';
 import type { AuthenticationMode, Config } from '../src/config.js';
+import type { HttpFetch } from '../src/types.js';
 import { advanceClockUntilSettled, trackPromise, waitForCondition } from './fixtures/asyncControl.js';
 import { assertNoSecrets, createLogCapture } from './fixtures/captureLogs.js';
 import { FakeClock } from './fixtures/fakeClock.js';
@@ -46,7 +49,19 @@ const STILL_UNAUTHORIZED_LOG_LINE = '[auth] request still unauthorized after sig
 const REQUEST_CANCELLED_LOG_LINE = '[auth] caller cancelled, request not sent';
 const SERVER_ERROR_BODY = '{"id":"app.internal_failure"}';
 const CHANNEL_ID = 'channel-1';
-const NON_API_MEMBER_NAMES = ['constructor', 'withCallContext', 'request', 'authorizedSend', 'throwIfCallCancelled', 'send', 'createFailureError'];
+const FILE_ID = 'file-1';
+const FILE_URL = `${MATTERMOST_URL}/files/${FILE_ID}`;
+const FILE_BYTES = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x00, 0xff, 0x0a]);
+const NON_API_MEMBER_NAMES = [
+  'constructor',
+  'withCallContext',
+  'request',
+  'authorizedSend',
+  'requestBinary',
+  'throwIfCallCancelled',
+  'send',
+  'createFailureError',
+];
 
 const CONFIG: Config = { mattermostUrl: MATTERMOST_URL, token: '', teamId: TEAM_ID };
 const SUCCESS_REPLY: FakeHttpReply = { status: 200, body: { id: USER_ID, order: [], posts: {} } };
@@ -115,7 +130,7 @@ interface PublicMethodCall {
   name: string;
   call: (client: MattermostClient) => Promise<unknown>;
   expectedRequests: Array<Pick<FakeHttpRecord, 'method' | 'url' | 'body'>>;
-  /** Текст ошибки 1.1.2 (git show 3c6dd0d:src/client.ts), когда последний запрос метода получил 500 с телом SERVER_ERROR_BODY */
+  /** Текст ошибки, когда последний запрос метода получил 500 с телом SERVER_ERROR_BODY: у методов 1.1.2 это их текст из git show 3c6dd0d:src/client.ts, у новых методов текст в том же формате */
   serverErrorMessage: string;
 }
 
@@ -173,6 +188,18 @@ const PUBLIC_METHOD_CALLS: readonly PublicMethodCall[] = [
     serverErrorMessage: `Failed to get post thread: ${SERVER_ERROR_STATUS_DESCRIPTION}`,
   },
   {
+    name: 'getFileInfo',
+    call: (client) => client.getFileInfo(FILE_ID),
+    expectedRequests: [{ method: 'GET', url: `${FILE_URL}/info`, body: undefined }],
+    serverErrorMessage: `Failed to get file info: ${SERVER_ERROR_STATUS_DESCRIPTION}`,
+  },
+  {
+    name: 'downloadFile',
+    call: (client) => client.downloadFile(FILE_ID),
+    expectedRequests: [{ method: 'GET', url: FILE_URL, body: undefined }],
+    serverErrorMessage: `Failed to download file: ${SERVER_ERROR_STATUS_DESCRIPTION}`,
+  },
+  {
     name: 'addReaction',
     call: (client) => client.addReaction('post-1', 'thumbsup'),
     expectedRequests: [{ method: 'POST', url: `${MATTERMOST_URL}/reactions`, body: '{"post_id":"post-1","emoji_name":"thumbsup"}' }],
@@ -220,7 +247,7 @@ test('C1: every public method sends the current provider token and keeps its req
       typeof Object.getOwnPropertyDescriptor(MattermostClient.prototype, name)?.value === 'function' &&
       !NON_API_MEMBER_NAMES.includes(name),
   );
-  assert.equal(PUBLIC_METHOD_CALLS.length, 13);
+  assert.equal(PUBLIC_METHOD_CALLS.length, 15);
   assert.deepEqual([...prototypeMethodNames].sort(), PUBLIC_METHOD_CALLS.map(({ name }) => name).sort());
 
   const provider = new ScriptedTokenProvider(AUTHENTICATION_MODES.BROWSER, FIRST_PROVIDER_TOKEN, undefined);
@@ -569,5 +596,119 @@ test('C9: a 500 response with a body keeps the 1.1.2 error text of every public 
       });
       assert.deepEqual(describeRequests(http.records), expectedRequests, description);
     }
+  }
+});
+
+test('C10: downloadFile streams the body after one sign-in retry, drains the rejected body and fails after a second 401', async (t) => {
+  const errorOutput = t.mock.method(console, 'error', () => undefined);
+  const interactiveContext = createInteractiveContext();
+  const recoveringProvider = new ScriptedTokenProvider(AUTHENTICATION_MODES.BROWSER, EXPIRED_TOKEN, FRESH_TOKEN);
+  const recoveringHttp = new FakeHttp(
+    createTokenScenario({ [FRESH_TOKEN]: { status: 200, body: FILE_BYTES } }, { status: 401, body: SESSION_EXPIRED_BODY }),
+  );
+  const drainedStatuses: number[] = [];
+  const drainingFetch: HttpFetch = async (url, request) => {
+    const response = await recoveringHttp.fetch(url, request);
+    return {
+      ...response,
+      text: async () => {
+        drainedStatuses.push(response.status);
+        return response.text();
+      },
+    };
+  };
+  const recoveringClient = new MattermostClient({
+    config: CONFIG,
+    tokenProvider: recoveringProvider,
+    fetchImplementation: drainingFetch,
+  }).withCallContext(interactiveContext);
+
+  const body = await recoveringClient.downloadFile(FILE_ID);
+
+  assert.deepEqual(new Uint8Array(await buffer(body)), FILE_BYTES);
+  assert.equal(recoveringProvider.recoverCalls.length, 1);
+  assert.equal(recoveringProvider.recoverCalls[0].rejectedToken, EXPIRED_TOKEN);
+  assert.deepEqual(drainedStatuses, [401]);
+  assert.deepEqual(
+    recoveringHttp.records.map((record) => record.authorization),
+    [`Bearer ${EXPIRED_TOKEN}`, `Bearer ${FRESH_TOKEN}`],
+  );
+
+  const provider = new ScriptedTokenProvider(AUTHENTICATION_MODES.BROWSER, EXPIRED_TOKEN, FRESH_TOKEN);
+  const http = new FakeHttp(() => UNAUTHORIZED_REPLY);
+  await assert.rejects(createClient(provider, http).withCallContext(interactiveContext).downloadFile(FILE_ID), (error: unknown) => {
+    assert.ok(error instanceof MattermostAuthenticationError);
+    assert.equal(error.code, AUTHENTICATION_ERROR_CODES.UNAUTHORIZED_AFTER_RETRY);
+    assert.equal(error.message, '[UNAUTHORIZED_AFTER_RETRY] Failed to download file: 401 Unauthorized after sign-in');
+    return true;
+  });
+  assert.equal(http.records.length, 2);
+  assert.equal(provider.recoverCalls.length, 1);
+  assert.equal(printedLines(errorOutput.mock.calls).filter((line) => line === STILL_UNAUTHORIZED_LOG_LINE).length, 1);
+});
+
+test('C11: a downloadFile call cancelled before sending sends no request', async (t) => {
+  t.mock.method(console, 'error', () => undefined);
+  const cancellation = new AbortController();
+  cancellation.abort();
+  const callContext = createToolCallContext({
+    progressToken: undefined,
+    sendProgressNotification: async () => undefined,
+    cancellationSignal: cancellation.signal,
+    logger: () => undefined,
+  });
+  const http = new FakeHttp(() => ({ status: 200, body: FILE_BYTES }));
+  const client = createClient(new ScriptedTokenProvider(AUTHENTICATION_MODES.BROWSER, FRESH_TOKEN, undefined), http);
+
+  await assert.rejects(client.withCallContext(callContext).downloadFile(FILE_ID), (error: unknown) => {
+    assert.ok(error instanceof MattermostAuthenticationError);
+    assert.equal(error.code, AUTHENTICATION_ERROR_CODES.REQUEST_CANCELLED);
+    assert.equal(error.message, '[REQUEST_CANCELLED] Failed to download file: request cancelled by caller');
+    return true;
+  });
+  assert.equal(http.records.length, 0);
+});
+
+test('C12: the binary download sends no JSON Content-Type while JSON requests keep it', async (t) => {
+  t.mock.method(console, 'error', () => undefined);
+  const http = new FakeHttp((_token, record) => (record.url === FILE_URL ? { status: 200, body: FILE_BYTES } : SUCCESS_REPLY));
+  const client = createClient(new StaticTokenProvider(STATIC_TOKEN), http);
+
+  await client.getFileInfo(FILE_ID);
+  await buffer(await client.downloadFile(FILE_ID));
+  await client.createPost(CHANNEL_ID, 'hello');
+
+  assert.deepEqual(
+    http.records.map(({ url, contentType }) => ({ url, contentType })),
+    [
+      { url: `${FILE_URL}/info`, contentType: JSON_CONTENT_TYPE },
+      { url: FILE_URL, contentType: undefined },
+      { url: `${MATTERMOST_URL}/posts`, contentType: JSON_CONTENT_TYPE },
+    ],
+  );
+});
+
+test('C13: failed responses carry the HTTP status in MattermostRequestError without changing the message', async (t) => {
+  t.mock.method(console, 'error', () => undefined);
+  const http = new FakeHttp(() => UNAUTHORIZED_REPLY);
+  const client = createClient(new StaticTokenProvider(STATIC_TOKEN), http);
+  const cases = [
+    { status: 404, call: () => client.getFileInfo(FILE_ID), expectedMessage: 'Failed to get file info: 404 Not Found' },
+    { status: 403, call: () => client.downloadFile(FILE_ID), expectedMessage: 'Failed to download file: 403 Forbidden' },
+    {
+      status: 403,
+      call: () => client.getMyChannels(),
+      expectedMessage: `Failed to get user channels: 403 Forbidden - ${SERVER_ERROR_BODY}`,
+    },
+  ];
+
+  for (const { status, call, expectedMessage } of cases) {
+    http.setScenario(() => ({ status, body: SERVER_ERROR_BODY }));
+    await assert.rejects(call(), (error: unknown) => {
+      assert.ok(error instanceof MattermostRequestError, expectedMessage);
+      assert.equal(error.status, status, expectedMessage);
+      assert.equal(error.message, expectedMessage);
+      return true;
+    });
   }
 });

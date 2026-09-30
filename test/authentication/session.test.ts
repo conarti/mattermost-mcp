@@ -4,6 +4,7 @@ import { existsSync } from 'node:fs';
 import { access, mkdtemp, readFile, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Readable } from 'node:stream';
 import { after, test } from 'node:test';
 import type { BrowserInstallationProgress } from '../../src/authentication/browserInstallation.js';
 import {
@@ -767,6 +768,7 @@ function createFakeResponse(status: number, readBody: () => unknown = () => CURR
     statusText: `status ${status}`,
     json: async () => readBody(),
     text: async () => '',
+    body: Readable.from([Buffer.from('')]),
   };
 }
 

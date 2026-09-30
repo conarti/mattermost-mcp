@@ -1,10 +1,12 @@
-import { AUTHORIZATION_HEADER_NAME, BEARER_TOKEN_PREFIX } from '../../src/authentication/constants.js';
+import { Readable } from 'node:stream';
+import { AUTHORIZATION_HEADER_NAME, BEARER_TOKEN_PREFIX, CONTENT_TYPE_HEADER_NAME } from '../../src/authentication/constants.js';
 import type { HttpFetch, HttpRequest, HttpResponse } from '../../src/types.js';
 
 export interface FakeHttpRecord {
   readonly method: HttpRequest['method'];
   readonly url: string;
   readonly authorization: string | undefined;
+  readonly contentType: string | undefined;
   readonly body: string | undefined;
   readonly signal: AbortSignal | undefined;
   readonly redirect: HttpRequest['redirect'];
@@ -13,8 +15,10 @@ export interface FakeHttpRecord {
 export interface FakeHttpReply {
   readonly status: number;
   readonly statusText?: string;
-  /** Строка отдаётся из text() как есть, остальное сериализуется в JSON */
+  /** Строка и Uint8Array отдаются как есть, остальное сериализуется в JSON */
   readonly body?: unknown;
+  /** Поток тела вместо body, например с ошибкой посреди данных */
+  readonly bodyStream?: Readable;
 }
 
 /** Ответ выбирается по токену из заголовка Authorization и по записи запроса */
@@ -24,6 +28,7 @@ const STATUS_TEXTS: Readonly<Record<number, string>> = {
   200: 'OK',
   401: 'Unauthorized',
   403: 'Forbidden',
+  404: 'Not Found',
   500: 'Internal Server Error',
 };
 
@@ -35,13 +40,18 @@ function extractToken(authorization: string | undefined): string | undefined {
 }
 
 function createResponse(reply: FakeHttpReply): HttpResponse {
-  const bodyText = typeof reply.body === 'string' ? reply.body : JSON.stringify(reply.body ?? {});
+  const bodyBytes =
+    reply.body instanceof Uint8Array
+      ? reply.body
+      : Buffer.from(typeof reply.body === 'string' ? reply.body : JSON.stringify(reply.body ?? {}));
+  const bodyText = Buffer.from(bodyBytes).toString();
   return {
     ok: reply.status >= 200 && reply.status < 300,
     status: reply.status,
     statusText: reply.statusText ?? STATUS_TEXTS[reply.status] ?? '',
     json: async () => JSON.parse(bodyText),
     text: async () => bodyText,
+    body: reply.bodyStream ?? Readable.from([bodyBytes]),
   };
 }
 
@@ -55,6 +65,7 @@ export class FakeHttp {
         method: request.method,
         url,
         authorization: request.headers[AUTHORIZATION_HEADER_NAME],
+        contentType: request.headers[CONTENT_TYPE_HEADER_NAME],
         body: request.body,
         signal: request.signal,
         redirect: request.redirect,

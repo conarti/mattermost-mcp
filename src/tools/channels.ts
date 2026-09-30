@@ -1,6 +1,7 @@
 import { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { MattermostClient } from "../client.js";
 import { ListChannelsArgs, GetChannelHistoryArgs } from "../types.js";
+import { formatPostAttachments } from "./postFormatting.js";
 
 // Tool definition for listing channels
 export const listChannelsTool: Tool = {
@@ -208,6 +209,7 @@ export async function handleGetChannelHistory(
         create_at_ts: post.create_at,
         reply_count: post.reply_count,
         root_id: post.root_id || null,
+        ...formatPostAttachments(post),
       };
     });
 
